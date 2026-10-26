@@ -1,39 +1,45 @@
-# GPR Market Lab
+# GPR Crypto Futures 1H Scanner
 
-Prototype bersih yang menjadikan **Gaussian Process Regression (GPR)** sebagai inti model.
+Screener Streamlit khusus **USDT Perpetual Crypto Futures** dengan **GPR sebagai mesin utama ranking**.
 
-## Struktur
+## Fokus v1
 
-- `app.py` — UI Streamlit
-- `gpr_model.py` — kernel Matérn 3/2, feature engineering, training GPR, projection, validation
-- `data.py` — pengambilan dan normalisasi data Yahoo Finance
-- `requirements.txt` — dependency
+- Binance Futures atau Bybit Linear Futures
+- Timeframe tetap **1H**
+- Hanya kontrak **USDT Perpetual**
+- Filter likuiditas dilakukan sebelum GPR
+- GPR memakai basis kode yang kamu kirim:
+  - Matern 3/2 kernel
+  - momentum
+  - volatility
+  - relative volume
+  - EMA fast/slow
+  - validation T-3
+  - prediction band
+- Ranking:
+  - validation hit rate
+  - validation MAPE
+  - trend
+  - momentum
+  - projected GPR return
+- Signal:
+  - LONG CANDIDATE
+  - SHORT CANDIDATE
+  - WATCH
+  - AVOID
+- Tidak memakai API key.
+- Tidak melakukan order otomatis.
 
-## Jalankan
+## Deploy ke Streamlit Cloud
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+1. Buat repo GitHub baru.
+2. Upload:
+   - `app.py`
+   - `requirements.txt`
+3. Di Streamlit Community Cloud pilih repo tersebut.
+4. Main file: `app.py`.
+5. Deploy.
 
-## Konsep model
+## Catatan
 
-Input feature GPR:
-1. log return
-2. momentum EMA
-3. relative volume
-4. volatility relatif
-5. jarak EMA fast/slow
-
-Target model: **log return candle berikutnya**.
-
-Kernel: **Matérn 3/2**.
-
-Output:
-- proyeksi harga
-- rentang ketidakpastian
-- validasi historis T-n
-- MAPE validasi
-- hit-rate band
-
-Versi ini sengaja tidak memasukkan universe scanner besar, multi-threading, atau API exchange sebagai fondasi. Setelah core GPR stabil, scanner dapat ditambahkan sebagai layer di atasnya.
+Untuk versi awal, GPR sengaja tidak dicampur dengan terlalu banyak indikator. Data futures hanya dipakai untuk membangun universe dan filter likuiditas. Setelah versi dasar stabil, kita bisa menambahkan funding rate, open interest, taker flow, dan market regime sebagai layer terpisah tanpa merusak core GPR.
