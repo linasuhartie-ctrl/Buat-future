@@ -1,28 +1,17 @@
 import streamlit as st
-import requests
 import pandas as pd
 import numpy as np
+import requests
 import time
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
 from sklearn.preprocessing import StandardScaler
 
 
 # ============================================================
-# GPR CRYPTO FUTURES SCANNER
-#
-# TARGET UTAMA
-#   USDT PERPETUAL
-#   TIMEFRAME 1H
-#   GPR = MESIN RANKING UTAMA
-#
-# PUBLIC MARKET DATA - NO API KEY
-# PROVIDER UTAMA = OKX
+# PAGE CONFIG
 # ============================================================
-
 
 st.set_page_config(
     page_title="GPR Crypto Futures Scanner",
@@ -33,11 +22,10 @@ st.set_page_config(
 
 
 # ============================================================
-# CSS
+# STYLE
 # ============================================================
 
-st.markdown(
-    """
+st.markdown("""
 <style>
 
 .block-container {
@@ -45,1469 +33,153 @@ st.markdown(
     padding-bottom: 2rem;
 }
 
-.main-title {
-    font-size: 38px;
-    font-weight: 800;
-    margin-bottom: 0px;
+h1 {
+    font-size: 2.4rem !important;
+    margin-bottom: 0.2rem !important;
 }
 
-.subtitle {
-    color: #6b7280;
-    font-size: 16px;
-    margin-bottom: 20px;
+.small-muted {
+    color: #777;
+    font-size: 0.9rem;
 }
 
-.section-title {
-    font-size: 24px;
-    font-weight: 750;
-    margin-top: 10px;
-    margin-bottom: 10px;
+.signal-long {
+    color: #00a65a;
+    font-weight: 700;
 }
 
-.small-note {
-    color: #6b7280;
-    font-size: 12px;
+.signal-short {
+    color: #e53935;
+    font-weight: 700;
+}
+
+.metric-box {
+    padding: 18px;
+    border-radius: 12px;
+    border: 1px solid #dddddd;
+    background: #fafafa;
+    min-height: 120px;
+}
+
+.metric-title {
+    font-size: 0.85rem;
+    color: #777;
+}
+
+.metric-value {
+    font-size: 1.8rem;
+    font-weight: 700;
+}
+
+.good-box {
+    padding: 14px;
+    border-radius: 10px;
+    background: #eaf7ef;
+    border: 1px solid #b9e4c8;
+}
+
+.warn-box {
+    padding: 14px;
+    border-radius: 10px;
+    background: #fff8df;
+    border: 1px solid #f0dc8a;
+}
+
+.error-box {
+    padding: 14px;
+    border-radius: 10px;
+    background: #fdecec;
+    border: 1px solid #efb1b1;
 }
 
 </style>
-""",
-    unsafe_allow_html=True
-)
+""", unsafe_allow_html=True)
 
 
 # ============================================================
-# CONSTANTS
+# CONFIG
 # ============================================================
 
-OKX_BASE = "https://www.okx.com/api/v5"
+OKX_BASE = "https://www.okx.com"
 
-
-# ============================================================
-# STATIC FUTURES UNIVERSE
-#
-# Tidak menggunakan endpoint instruments/exchangeInfo
-# agar tidak terkena 403/451 seperti deployment sebelumnya.
-# ============================================================
-
-STATIC_SYMBOLS = [
-    "BTC-USDT-SWAP",
-    "ETH-USDT-SWAP",
-    "SOL-USDT-SWAP",
-    "XRP-USDT-SWAP",
-    "DOGE-USDT-SWAP",
-    "ADA-USDT-SWAP",
-    "AVAX-USDT-SWAP",
-    "LINK-USDT-SWAP",
-    "DOT-USDT-SWAP",
-    "LTC-USDT-SWAP",
-    "BCH-USDT-SWAP",
-    "UNI-USDT-SWAP",
-    "ATOM-USDT-SWAP",
-    "ETC-USDT-SWAP",
-    "FIL-USDT-SWAP",
-    "APT-USDT-SWAP",
-    "ARB-USDT-SWAP",
-    "OP-USDT-SWAP",
-    "SUI-USDT-SWAP",
-    "SEI-USDT-SWAP",
-    "NEAR-USDT-SWAP",
-    "INJ-USDT-SWAP",
-    "AAVE-USDT-SWAP",
-    "MKR-USDT-SWAP",
-    "CRV-USDT-SWAP",
-    "LDO-USDT-SWAP",
-    "IMX-USDT-SWAP",
-    "GRT-USDT-SWAP",
-    "ALGO-USDT-SWAP",
-    "XLM-USDT-SWAP",
-    "TRX-USDT-SWAP",
-    "TON-USDT-SWAP",
-    "HBAR-USDT-SWAP",
-    "ICP-USDT-SWAP",
-    "VET-USDT-SWAP",
-    "SAND-USDT-SWAP",
-    "MANA-USDT-SWAP",
-    "AXS-USDT-SWAP",
-    "GALA-USDT-SWAP",
-    "APE-USDT-SWAP",
-    "EOS-USDT-SWAP",
-    "THETA-USDT-SWAP",
-    "RUNE-USDT-SWAP",
-    "WLD-USDT-SWAP",
-    "TIA-USDT-SWAP",
-    "JUP-USDT-SWAP",
-    "PYTH-USDT-SWAP",
-    "PEPE-USDT-SWAP",
-    "SHIB-USDT-SWAP",
-    "BONK-USDT-SWAP",
-    "FLOKI-USDT-SWAP",
-    "WIF-USDT-SWAP",
-    "ORDI-USDT-SWAP",
-    "STX-USDT-SWAP",
-    "ENA-USDT-SWAP",
-    "ONDO-USDT-SWAP",
-    "NOT-USDT-SWAP",
-    "ZRO-USDT-SWAP",
-    "JTO-USDT-SWAP",
-    "TAO-USDT-SWAP",
-    "KAS-USDT-SWAP",
-    "FET-USDT-SWAP",
-    "RENDER-USDT-SWAP",
-    "AR-USDT-SWAP",
-    "DYM-USDT-SWAP",
-    "STRK-USDT-SWAP",
-    "MANTA-USDT-SWAP",
-    "BLUR-USDT-SWAP",
-    "MINA-USDT-SWAP",
-    "FLOW-USDT-SWAP",
-    "QNT-USDT-SWAP",
-    "XTZ-USDT-SWAP",
-    "ZEC-USDT-SWAP",
-    "DASH-USDT-SWAP",
-    "COMP-USDT-SWAP",
-    "SNX-USDT-SWAP",
-    "1INCH-USDT-SWAP",
-    "YFI-USDT-SWAP",
-    "SUSHI-USDT-SWAP",
-    "ENS-USDT-SWAP",
-    "DYDX-USDT-SWAP",
-    "WOO-USDT-SWAP",
-    "JASMY-USDT-SWAP",
-    "CFX-USDT-SWAP",
-    "CKB-USDT-SWAP",
-    "IOTA-USDT-SWAP",
-    "AXL-USDT-SWAP",
-    "MAVIA-USDT-SWAP",
-    "TURBO-USDT-SWAP",
+# Static universe.
+# Tidak menggunakan endpoint instruments agar tidak tergantung
+# endpoint yang sebelumnya bermasalah.
+UNIVERSE = [
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ADA", "AVAX",
+    "LINK", "DOT", "TRX", "SUI", "TON", "SHIB", "LTC", "BCH",
+    "NEAR", "APT", "ICP", "FIL", "ATOM", "ETC", "ARB", "OP",
+    "INJ", "IMX", "AAVE", "MKR", "RUNE", "UNI", "LDO", "STX",
+    "SEI", "TIA", "JUP", "WIF", "PEPE", "BONK", "FLOKI", "WLD",
+    "ENA", "ONDO", "PYTH", "JTO", "STRK", "NOT", "ORDI", "SATS",
+    "SAND", "MANA", "AXS", "GALA", "EOS", "XLM", "VET", "ALGO",
+    "HBAR", "FTM", "APE", "CRV", "COMP", "SNX", "DYDX", "1INCH",
+    "KAS", "TAO", "FET", "RENDER", "MANTA", "DYM", "WOO", "JASMY",
+    "KAVA", "MINA", "CELO", "ZRX", "QTUM"
 ]
 
-
-# ============================================================
-# HTTP
-# ============================================================
-
-def get_session():
-    session = requests.Session()
-
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "Chrome/130.0 Safari/537.36"
-        ),
-        "Accept": "application/json,text/plain,*/*",
-        "Connection": "keep-alive",
-    })
-
-    return session
-
-
-# ============================================================
-# OKX API
-# ============================================================
-
-def okx_get(path, params=None, timeout=15):
-
-    url = OKX_BASE + path
-
-    session = get_session()
-
-    try:
-
-        response = session.get(
-            url,
-            params=params,
-            timeout=timeout
-        )
-
-        response.raise_for_status()
-
-        payload = response.json()
-
-        if payload.get("code") != "0":
-
-            raise RuntimeError(
-                f"OKX code={payload.get('code')} "
-                f"msg={payload.get('msg')}"
-            )
-
-        return payload.get("data", [])
-
-    except requests.exceptions.RequestException as e:
-
-        raise RuntimeError(
-            f"HTTP error: {str(e)}"
-        )
-
-    except ValueError:
-
-        raise RuntimeError(
-            "Response OKX bukan JSON"
-        )
-
-    except Exception as e:
-
-        raise RuntimeError(
-            str(e)
-        )
-
-
-# ============================================================
-# UNIVERSE
-# ============================================================
-
-@st.cache_data(ttl=300)
-def get_universe():
-
-    return STATIC_SYMBOLS.copy()
-
-
-# ============================================================
-# GET 1H CANDLES
-# ============================================================
-
-def get_candles(inst_id, limit=180):
-
-    data = okx_get(
-        "/market/candles",
-        params={
-            "instId": inst_id,
-            "bar": "1H",
-            "limit": min(limit, 300)
-        },
-        timeout=15
-    )
-
-    if not data:
-
-        raise RuntimeError(
-            "No candle data"
-        )
-
-    rows = []
-
-    for x in data:
-
-        if len(x) < 6:
-            continue
-
-        try:
-
-            rows.append({
-
-                "ts": pd.to_datetime(
-                    int(x[0]),
-                    unit="ms",
-                    utc=True
-                ),
-
-                "open": float(x[1]),
-
-                "high": float(x[2]),
-
-                "low": float(x[3]),
-
-                "close": float(x[4]),
-
-                "volume": float(x[5]),
-
-                "confirm": (
-                    x[8]
-                    if len(x) > 8
-                    else "1"
-                )
-            })
-
-        except Exception:
-            continue
-
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-
-        raise RuntimeError(
-            "Empty dataframe"
-        )
-
-    df = (
-        df
-        .sort_values("ts")
-        .reset_index(drop=True)
-    )
-
-    # Buang candle yang belum confirmed
-    if "confirm" in df.columns:
-
-        df = df[
-            df["confirm"]
-            .astype(str)
-            .eq("1")
-        ].copy()
-
-    if len(df) < 100:
-
-        raise RuntimeError(
-            f"Candle kurang: {len(df)}"
-        )
-
-    return df
-
-
-# ============================================================
-# FEATURE ENGINEERING
-# ============================================================
-
-def make_features(df):
-
-    d = df.copy()
-
-    close = d["close"]
-    high = d["high"]
-    low = d["low"]
-    volume = d["volume"]
-
-
-    # --------------------------------------------------------
-    # RETURN
-    # --------------------------------------------------------
-
-    d["ret1"] = close.pct_change(1)
-    d["ret3"] = close.pct_change(3)
-    d["ret6"] = close.pct_change(6)
-    d["ret12"] = close.pct_change(12)
-    d["ret24"] = close.pct_change(24)
-
-
-    # --------------------------------------------------------
-    # MOMENTUM
-    # --------------------------------------------------------
-
-    d["mom6"] = (
-        close / close.shift(6) - 1
-    )
-
-    d["mom12"] = (
-        close / close.shift(12) - 1
-    )
-
-    d["mom24"] = (
-        close / close.shift(24) - 1
-    )
-
-
-    # --------------------------------------------------------
-    # VOLATILITY
-    # --------------------------------------------------------
-
-    d["vol6"] = (
-        d["ret1"]
-        .rolling(6)
-        .std()
-    )
-
-    d["vol12"] = (
-        d["ret1"]
-        .rolling(12)
-        .std()
-    )
-
-    d["vol24"] = (
-        d["ret1"]
-        .rolling(24)
-        .std()
-    )
-
-
-    # --------------------------------------------------------
-    # RANGE
-    # --------------------------------------------------------
-
-    d["range"] = (
-        (high - low) / close
-    )
-
-    d["range6"] = (
-        d["range"]
-        .rolling(6)
-        .mean()
-    )
-
-
-    # --------------------------------------------------------
-    # CANDLE BODY
-    # --------------------------------------------------------
-
-    d["body"] = (
-        (close - d["open"])
-        / d["open"]
-    )
-
-
-    # --------------------------------------------------------
-    # EMA
-    # --------------------------------------------------------
-
-    d["ema12"] = (
-        close
-        .ewm(
-            span=12,
-            adjust=False
-        )
-        .mean()
-    )
-
-    d["ema24"] = (
-        close
-        .ewm(
-            span=24,
-            adjust=False
-        )
-        .mean()
-    )
-
-    d["ema48"] = (
-        close
-        .ewm(
-            span=48,
-            adjust=False
-        )
-        .mean()
-    )
-
-
-    d["ema12_dist"] = (
-        close / d["ema12"] - 1
-    )
-
-    d["ema24_dist"] = (
-        close / d["ema24"] - 1
-    )
-
-    d["ema48_dist"] = (
-        close / d["ema48"] - 1
-    )
-
-
-    # --------------------------------------------------------
-    # RSI 14
-    # --------------------------------------------------------
-
-    delta = close.diff()
-
-    gain = delta.clip(
-        lower=0
-    )
-
-    loss = -delta.clip(
-        upper=0
-    )
-
-    avg_gain = (
-        gain
-        .rolling(14)
-        .mean()
-    )
-
-    avg_loss = (
-        loss
-        .rolling(14)
-        .mean()
-    )
-
-    rs = (
-        avg_gain
-        / avg_loss.replace(
-            0,
-            np.nan
-        )
-    )
-
-    d["rsi14"] = (
-        100
-        - (
-            100
-            / (1 + rs)
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # VOLUME Z-SCORE
-    # --------------------------------------------------------
-
-    vol_mean = (
-        volume
-        .rolling(24)
-        .mean()
-    )
-
-    vol_std = (
-        volume
-        .rolling(24)
-        .std()
-    )
-
-    d["volume_z"] = (
-        (volume - vol_mean)
-        / vol_std.replace(
-            0,
-            np.nan
-        )
-    )
-
-
-    return d
-
-
-# ============================================================
-# GPR FEATURES
-# ============================================================
-
-FEATURES = [
-
-    "ret1",
-    "ret3",
-    "ret6",
-    "ret12",
-    "ret24",
-
-    "mom6",
-    "mom12",
-    "mom24",
-
-    "vol6",
-    "vol12",
-    "vol24",
-
-    "range6",
-    "body",
-
-    "ema12_dist",
-    "ema24_dist",
-    "ema48_dist",
-
-    "rsi14",
-    "volume_z",
-]
-
-
-# ============================================================
-# GPR MODEL
-# ============================================================
-
-def calculate_gpr(df, horizon):
-
-    d = make_features(df)
-
-
-    # --------------------------------------------------------
-    # TARGET
-    #
-    # Future return setelah N candle.
-    #
-    # Contoh horizon = 10
-    # berarti prediksi return 10 jam ke depan
-    # karena timeframe utama = 1H.
-    # --------------------------------------------------------
-
-    d["future_return"] = (
-        d["close"].shift(-horizon)
-        / d["close"]
-        - 1
-    )
-
-
-    model_df = (
-        d[
-            FEATURES
-            + ["future_return"]
-        ]
-        .replace(
-            [np.inf, -np.inf],
-            np.nan
-        )
-        .dropna()
-    )
-
-
-    # --------------------------------------------------------
-    # MINIMUM DATA
-    # --------------------------------------------------------
-
-    if len(model_df) < 80:
-
-        raise RuntimeError(
-            f"Data training kurang: "
-            f"{len(model_df)}"
-        )
-
-
-    # Fokus ke regime terbaru
-
-    model_df = (
-        model_df
-        .tail(140)
-    )
-
-
-    X = (
-        model_df[FEATURES]
-        .values
-    )
-
-    y = (
-        model_df["future_return"]
-        .values
-    )
-
-
-    # --------------------------------------------------------
-    # WINSORIZE TARGET
-    # --------------------------------------------------------
-
-    low_q = np.quantile(
-        y,
-        0.05
-    )
-
-    high_q = np.quantile(
-        y,
-        0.95
-    )
-
-    y = np.clip(
-        y,
-        low_q,
-        high_q
-    )
-
-
-    # --------------------------------------------------------
-    # STANDARD SCALER
-    # --------------------------------------------------------
-
-    scaler = StandardScaler()
-
-    X_scaled = (
-        scaler.fit_transform(X)
-    )
-
-
-    # --------------------------------------------------------
-    # GPR KERNEL
-    # --------------------------------------------------------
-
-    kernel = (
-
-        ConstantKernel(
-            1.0,
-            (
-                0.1,
-                10.0
-            )
-        )
-
-        *
-
-        RBF(
-            length_scale=1.0,
-            length_scale_bounds=(
-                0.1,
-                10.0
-            )
-        )
-
-        +
-
-        WhiteKernel(
-            noise_level=0.05,
-            noise_level_bounds=(
-                1e-5,
-                1.0
-            )
-        )
-    )
-
-
-    gpr = GaussianProcessRegressor(
-
-        kernel=kernel,
-
-        normalize_y=True,
-
-        n_restarts_optimizer=0,
-
-        random_state=42
-    )
-
-
-    # --------------------------------------------------------
-    # TRAIN
-    # --------------------------------------------------------
-
-    gpr.fit(
-        X_scaled,
-        y
-    )
-
-
-    # --------------------------------------------------------
-    # LATEST FEATURE
-    # --------------------------------------------------------
-
-    latest = (
-        d[FEATURES]
-        .replace(
-            [np.inf, -np.inf],
-            np.nan
-        )
-        .dropna()
-    )
-
-
-    if latest.empty:
-
-        raise RuntimeError(
-            "Latest features kosong"
-        )
-
-
-    x_now = (
-        latest[FEATURES]
-        .iloc[-1]
-        .values
-        .reshape(1, -1)
-    )
-
-
-    x_now_scaled = (
-        scaler.transform(
-            x_now
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # PREDICTION
-    # --------------------------------------------------------
-
-    pred, std = gpr.predict(
-
-        x_now_scaled,
-
-        return_std=True
-    )
-
-
-    pred_return = float(
-        pred[0]
-    )
-
-    uncertainty = float(
-        std[0]
-    )
-
-
-    return {
-
-        "prediction":
-            pred_return,
-
-        "uncertainty":
-            uncertainty,
-
-        "rsi":
-            float(
-                d["rsi14"]
-                .iloc[-1]
-            ),
-
-        "mom6":
-            float(
-                d["mom6"]
-                .iloc[-1]
-            ),
-
-        "mom12":
-            float(
-                d["mom12"]
-                .iloc[-1]
-            ),
-
-        "mom24":
-            float(
-                d["mom24"]
-                .iloc[-1]
-            ),
-
-        "vol24":
-            float(
-                d["vol24"]
-                .iloc[-1]
-            ),
-
-        "volume_z":
-            float(
-                d["volume_z"]
-                .iloc[-1]
-            ),
-
-        "ema12_dist":
-            float(
-                d["ema12_dist"]
-                .iloc[-1]
-            ),
-
-        "ema24_dist":
-            float(
-                d["ema24_dist"]
-                .iloc[-1]
-            ),
-
-        "last_price":
-            float(
-                d["close"]
-                .iloc[-1]
-            ),
-
-        "last_time":
-            d["ts"]
-            .iloc[-1]
-    }
-
-
-# ============================================================
-# GPR SCORE
-# ============================================================
-
-def calculate_score(result):
-
-    pred = result["prediction"]
-
-    uncertainty = result[
-        "uncertainty"
-    ]
-
-    rsi = result["rsi"]
-
-    mom6 = result["mom6"]
-
-    mom12 = result["mom12"]
-
-    ema12 = result[
-        "ema12_dist"
-    ]
-
-    ema24 = result[
-        "ema24_dist"
-    ]
-
-    volume_z = result[
-        "volume_z"
-    ]
-
-
-    # --------------------------------------------------------
-    # DIRECTION
-    # --------------------------------------------------------
-
-    if pred > 0:
-
-        direction = "LONG"
-
-    elif pred < 0:
-
-        direction = "SHORT"
-
-    else:
-
-        direction = "NEUTRAL"
-
-
-    # --------------------------------------------------------
-    # SIGNAL STRENGTH
-    # --------------------------------------------------------
-
-    signal_strength = min(
-
-        abs(pred) / 0.05,
-
-        1.0
-    )
-
-
-    # --------------------------------------------------------
-    # CONFIDENCE
-    # --------------------------------------------------------
-
-    confidence_ratio = (
-
-        abs(pred)
-
-        /
-
-        max(
-            uncertainty,
-            1e-8
-        )
-    )
-
-
-    confidence = min(
-
-        confidence_ratio / 3.0,
-
-        1.0
-    )
-
-
-    # --------------------------------------------------------
-    # MOMENTUM AGREEMENT
-    # --------------------------------------------------------
-
-    if direction == "LONG":
-
-        momentum_score = np.mean([
-
-            mom6 > 0,
-
-            mom12 > 0,
-
-            ema12 > 0,
-
-            ema24 > 0
-        ])
-
-
-    elif direction == "SHORT":
-
-        momentum_score = np.mean([
-
-            mom6 < 0,
-
-            mom12 < 0,
-
-            ema12 < 0,
-
-            ema24 < 0
-        ])
-
-
-    else:
-
-        momentum_score = 0
-
-
-    # --------------------------------------------------------
-    # RSI QUALITY
-    # --------------------------------------------------------
-
-    if direction == "LONG":
-
-        rsi_score = (
-
-            1.0
-            if 45 <= rsi <= 68
-
-            else 0.5
-            if 35 <= rsi <= 75
-
-            else 0.2
-        )
-
-
-    elif direction == "SHORT":
-
-        rsi_score = (
-
-            1.0
-            if 32 <= rsi <= 55
-
-            else 0.5
-            if 25 <= rsi <= 65
-
-            else 0.2
-        )
-
-
-    else:
-
-        rsi_score = 0
-
-
-    # --------------------------------------------------------
-    # VOLUME
-    # --------------------------------------------------------
-
-    volume_score = min(
-
-        max(
-            (volume_z + 1) / 3,
-            0
-        ),
-
-        1
-    )
-
-
-    # --------------------------------------------------------
-    # FINAL SCORE
-    #
-    # TOTAL = 100
-    #
-    # GPR prediction       45
-    # Confidence            25
-    # Momentum               20
-    # RSI                     7
-    # Volume                  3
-    # --------------------------------------------------------
-
-    score = (
-
-        45
-        * signal_strength
-
-        +
-
-        25
-        * confidence
-
-        +
-
-        20
-        * momentum_score
-
-        +
-
-        7
-        * rsi_score
-
-        +
-
-        3
-        * volume_score
-    )
-
-
-    return (
-
-        float(
-            np.clip(
-                score,
-                0,
-                100
-            )
-        ),
-
-        direction
-    )
-
-
-# ============================================================
-# ANALYZE ONE SYMBOL
-# ============================================================
-
-def analyze_symbol(
-    inst_id,
-    horizon
-):
-
-    try:
-
-        df = get_candles(
-            inst_id,
-            limit=180
-        )
-
-
-        result = calculate_gpr(
-            df,
-            horizon
-        )
-
-
-        score, direction = (
-            calculate_score(
-                result
-            )
-        )
-
-
-        symbol = (
-            inst_id
-            .replace(
-                "-USDT-SWAP",
-                ""
-            )
-        )
-
-
-        confidence = (
-
-            abs(
-                result["prediction"]
-            )
-
-            /
-
-            max(
-                result["uncertainty"],
-                1e-8
-            )
-        )
-
-
-        return {
-
-            "Symbol":
-                symbol,
-
-            "Instrument":
-                inst_id,
-
-            "Signal":
-                direction,
-
-            "GPR Score":
-                round(
-                    score,
-                    1
-                ),
-
-            "GPR Return":
-                result[
-                    "prediction"
-                ] * 100,
-
-            "Uncertainty":
-                result[
-                    "uncertainty"
-                ] * 100,
-
-            "Confidence":
-                confidence,
-
-            "Price":
-                result[
-                    "last_price"
-                ],
-
-            "RSI":
-                result[
-                    "rsi"
-                ],
-
-            "Mom 6H":
-                result[
-                    "mom6"
-                ] * 100,
-
-            "Mom 12H":
-                result[
-                    "mom12"
-                ] * 100,
-
-            "Mom 24H":
-                result[
-                    "mom24"
-                ] * 100,
-
-            "Volume Z":
-                result[
-                    "volume_z"
-                ],
-
-            "EMA12 Dist":
-                result[
-                    "ema12_dist"
-                ] * 100,
-
-            "EMA24 Dist":
-                result[
-                    "ema24_dist"
-                ] * 100,
-
-            "Last Candle":
-                result[
-                    "last_time"
-                ],
-
-            "Status":
-                "OK"
-        }
-
-
-    except Exception as e:
-
-        return {
-
-            "Symbol":
-                inst_id.replace(
-                    "-USDT-SWAP",
-                    ""
-                ),
-
-            "Instrument":
-                inst_id,
-
-            "Signal":
-                "-",
-
-            "GPR Score":
-                np.nan,
-
-            "GPR Return":
-                np.nan,
-
-            "Uncertainty":
-                np.nan,
-
-            "Confidence":
-                np.nan,
-
-            "Price":
-                np.nan,
-
-            "RSI":
-                np.nan,
-
-            "Mom 6H":
-                np.nan,
-
-            "Mom 12H":
-                np.nan,
-
-            "Mom 24H":
-                np.nan,
-
-            "Volume Z":
-                np.nan,
-
-            "EMA12 Dist":
-                np.nan,
-
-            "EMA24 Dist":
-                np.nan,
-
-            "Last Candle":
-                pd.NaT,
-
-            "Status":
-                str(e)
-        }
-
-
-# ============================================================
-# SCAN ALL
-# ============================================================
-
-def run_scan(
-    symbols,
-    horizon,
-    workers
-):
-
-    results = []
-
-
-    progress = st.progress(
-        0
-    )
-
-    status_text = st.empty()
-
-
-    total = len(symbols)
-
-    completed = 0
-
-
-    with ThreadPoolExecutor(
-        max_workers=workers
-    ) as executor:
-
-        futures = {
-
-            executor.submit(
-                analyze_symbol,
-                symbol,
-                horizon
-            ):
-            symbol
-
-            for symbol in symbols
-        }
-
-
-        for future in as_completed(
-            futures
-        ):
-
-            try:
-
-                results.append(
-                    future.result()
-                )
-
-
-            except Exception as e:
-
-                symbol = futures[
-                    future
-                ]
-
-                results.append({
-
-                    "Symbol":
-                        symbol,
-
-                    "Status":
-                        str(e)
-                })
-
-
-            completed += 1
-
-
-            progress.progress(
-
-                completed
-                /
-                total
-            )
-
-
-            status_text.write(
-
-                f"Scanning "
-                f"{completed}/{total}..."
-            )
-
-
-    progress.empty()
-
-    status_text.empty()
-
-
-    return pd.DataFrame(
-        results
-    )
-
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if "scan_result" not in st.session_state:
-
-    st.session_state.scan_result = None
-
-
-if "scan_time" not in st.session_state:
-
-    st.session_state.scan_time = None
 
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title(
-    "⚙️ Scanner Settings"
-)
+st.sidebar.title("⚙️ Scanner Settings")
 
+timeframe = st.sidebar.selectbox(
+    "Timeframe",
+    ["1H", "15m"],
+    index=0
+)
 
 horizon = st.sidebar.selectbox(
-
     "Horizon GPR",
-
-    options=[
-        3,
-        6,
-        10,
-        12,
-        18,
-        24
-    ],
-
-    index=2,
-
-    format_func=lambda x:
-        f"{x} candle / {x} jam"
+    [5, 10, 15, 20],
+    index=1,
+    format_func=lambda x: (
+        f"{x} candle / {x} jam" if timeframe == "1H"
+        else f"{x} candle / {x * 15 / 60:g} jam"
+    )
 )
-
 
 coin_count = st.sidebar.selectbox(
-
     "Jumlah coin",
-
-    options=[
-        20,
-        30,
-        50,
-        75,
-        79
-    ],
-
-    index=4
+    [20, 30, 50, 79],
+    index=3
 )
-
 
 minimum_score = st.sidebar.slider(
-
     "Minimum score",
-
-    min_value=0,
-
-    max_value=100,
-
+    min_value=50,
+    max_value=95,
     value=70,
-
-    step=5
+    step=1
 )
 
-
-workers = st.sidebar.slider(
-
+parallel_workers = st.sidebar.slider(
     "Parallel workers",
-
     min_value=1,
-
     max_value=8,
-
-    value=5
+    value=5,
+    step=1
 )
 
-
-st.sidebar.markdown("---")
-
+st.sidebar.divider()
 
 scan_button = st.sidebar.button(
-
-    "🚀 SCAN FUTURES 1H",
-
+    "🚀 SCAN FUTURES",
     type="primary",
-
     use_container_width=True
 )
 
-
 clear_button = st.sidebar.button(
-
     "🗑️ CLEAR CACHE",
-
     use_container_width=True
 )
 
 
 if clear_button:
-
     st.cache_data.clear()
-
-    st.session_state.scan_result = None
-
-    st.session_state.scan_time = None
-
     st.rerun()
 
 
@@ -1515,886 +187,1016 @@ if clear_button:
 # HEADER
 # ============================================================
 
-st.markdown(
+st.title("📈 GPR CRYPTO FUTURES SCANNER")
 
-    '<div class="main-title">'
-    '📈 GPR CRYPTO FUTURES SCANNER'
-    '</div>',
-
-    unsafe_allow_html=True
-)
-
-
-st.markdown(
-
-    '<div class="subtitle">'
-    'Target utama: USDT Perpetual · '
-    'Timeframe 1H · '
-    'GPR sebagai mesin ranking utama'
-    '</div>',
-
-    unsafe_allow_html=True
+st.caption(
+    f"Target utama: USDT Perpetual · Timeframe {timeframe} · "
+    f"GPR sebagai mesin ranking utama"
 )
 
 
 # ============================================================
-# INFO
+# DATA FUNCTIONS
 # ============================================================
 
-st.info(
+@st.cache_data(ttl=60, show_spinner=False)
+def get_okx_candles(symbol, bar="1H", limit=220):
 
-    "Mode data: public market data, tanpa API key. "
-    "Universe futures menggunakan daftar static agar "
-    "scanner tidak bergantung pada endpoint "
-    "instruments/exchangeInfo yang sebelumnya "
-    "menghasilkan HTTP 403/451."
-)
+    inst_id = f"{symbol}-USDT-SWAP"
+
+    url = f"{OKX_BASE}/api/v5/market/candles"
+
+    params = {
+        "instId": inst_id,
+        "bar": bar,
+        "limit": str(limit)
+    }
+
+    r = requests.get(
+        url,
+        params=params,
+        timeout=12,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
+    )
+
+    r.raise_for_status()
+
+    data = r.json()
+
+    if data.get("code") != "0":
+        raise RuntimeError(
+            f"OKX code={data.get('code')} "
+            f"msg={data.get('msg')}"
+        )
+
+    rows = data.get("data", [])
+
+    if not rows:
+        raise RuntimeError("No candle data")
+
+    # OKX candle:
+    # [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "vol_ccy",
+            "vol_quote",
+            "confirm"
+        ]
+    )
+
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]:
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    df["ts"] = pd.to_numeric(
+        df["ts"],
+        errors="coerce"
+    )
+
+    df["datetime"] = pd.to_datetime(
+        df["ts"],
+        unit="ms",
+        utc=True
+    )
+
+    df = df.sort_values("datetime")
+
+    # Hanya candle yang sudah confirmed
+    if "confirm" in df.columns:
+        df = df[df["confirm"].astype(str) == "1"]
+
+    df = df.dropna(
+        subset=[
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]
+    )
+
+    if len(df) < 100:
+        raise RuntimeError(
+            f"Insufficient candles: {len(df)}"
+        )
+
+    return df.reset_index(drop=True)
+
+
+# ============================================================
+# FEATURE ENGINEERING
+# ============================================================
+
+def calculate_rsi(series, period=14):
+
+    delta = series.diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi
+
+
+def add_features(df):
+
+    x = df.copy()
+
+    close = x["close"]
+    volume = x["volume"]
+
+    x["rsi14"] = calculate_rsi(
+        close,
+        14
+    )
+
+    x["mom_6"] = (
+        close / close.shift(6) - 1
+    ) * 100
+
+    x["mom_12"] = (
+        close / close.shift(12) - 1
+    ) * 100
+
+    x["mom_24"] = (
+        close / close.shift(24) - 1
+    ) * 100
+
+    x["ema12"] = close.ewm(
+        span=12,
+        adjust=False
+    ).mean()
+
+    x["ema24"] = close.ewm(
+        span=24,
+        adjust=False
+    ).mean()
+
+    x["ema12_dist"] = (
+        close / x["ema12"] - 1
+    ) * 100
+
+    x["ema24_dist"] = (
+        close / x["ema24"] - 1
+    ) * 100
+
+    vol_mean = volume.rolling(30).mean()
+    vol_std = volume.rolling(30).std()
+
+    x["volume_z"] = (
+        (volume - vol_mean) /
+        vol_std.replace(0, np.nan)
+    )
+
+    # Volatility
+    x["atr_pct"] = (
+        (x["high"] - x["low"]) /
+        close
+    ) * 100
+
+    # Trend
+    x["ema12_24_spread"] = (
+        x["ema12"] / x["ema24"] - 1
+    ) * 100
+
+    return x
+
+
+# ============================================================
+# GPR MODEL
+# ============================================================
+
+FEATURES = [
+    "rsi14",
+    "mom_6",
+    "mom_12",
+    "mom_24",
+    "volume_z",
+    "ema12_dist",
+    "ema24_dist",
+    "ema12_24_spread",
+    "atr_pct"
+]
+
+
+def train_gpr(df, horizon_bars):
+
+    data = add_features(df)
+
+    # Future return
+    data["future_return"] = (
+        data["close"].shift(-horizon_bars) /
+        data["close"] - 1
+    ) * 100
+
+    model_data = data.dropna(
+        subset=FEATURES + ["future_return"]
+    ).copy()
+
+    if len(model_data) < 80:
+        raise RuntimeError(
+            f"Not enough training data: {len(model_data)}"
+        )
+
+    # Batasi training agar ringan
+    model_data = model_data.tail(150)
+
+    X = model_data[FEATURES].replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    y = model_data["future_return"]
+
+    valid = X.notna().all(axis=1) & y.notna()
+
+    X = X.loc[valid]
+    y = y.loc[valid]
+
+    if len(X) < 60:
+        raise RuntimeError(
+            "Insufficient valid training rows"
+        )
+
+    scaler = StandardScaler()
+
+    X_scaled = scaler.fit_transform(X)
+
+    kernel = (
+        ConstantKernel(1.0)
+        * RBF(length_scale=1.0)
+        + WhiteKernel(noise_level=0.5)
+    )
+
+    model = GaussianProcessRegressor(
+        kernel=kernel,
+        normalize_y=True,
+        n_restarts_optimizer=0,
+        random_state=42
+    )
+
+    model.fit(
+        X_scaled,
+        y.values
+    )
+
+    latest = data.dropna(
+        subset=FEATURES
+    ).iloc[-1]
+
+    X_latest = latest[FEATURES].values.reshape(
+        1, -1
+    )
+
+    X_latest_scaled = scaler.transform(
+        X_latest
+    )
+
+    pred, std = model.predict(
+        X_latest_scaled,
+        return_std=True
+    )
+
+    prediction = float(pred[0])
+    uncertainty = float(std[0])
+
+    return (
+        prediction,
+        uncertainty,
+        latest,
+        model
+    )
+
+
+# ============================================================
+# SCORE ENGINE
+# ============================================================
+
+def calculate_score(
+    prediction,
+    uncertainty,
+    latest
+):
+
+    # Magnitude component
+    magnitude = min(
+        abs(prediction) / 5.0,
+        1.0
+    )
+
+    # Confidence component
+    confidence = 1 / (
+        1 + max(uncertainty, 0)
+    )
+
+    # RSI sanity
+    rsi = float(latest["rsi14"])
+
+    if prediction > 0:
+        rsi_component = (
+            1.0 if 45 <= rsi <= 70
+            else 0.5
+        )
+    else:
+        rsi_component = (
+            1.0 if 30 <= rsi <= 55
+            else 0.5
+        )
+
+    # Momentum alignment
+    mom_values = [
+        latest["mom_6"],
+        latest["mom_12"],
+        latest["mom_24"]
+    ]
+
+    avg_mom = np.nanmean(
+        mom_values
+    )
+
+    if prediction > 0:
+        momentum_alignment = (
+            1.0 if avg_mom > 0
+            else 0.4
+        )
+    else:
+        momentum_alignment = (
+            1.0 if avg_mom < 0
+            else 0.4
+        )
+
+    score = (
+        magnitude * 40
+        + confidence * 25
+        + rsi_component * 15
+        + momentum_alignment * 20
+    )
+
+    score = float(
+        np.clip(score, 0, 100)
+    )
+
+    return score
+
+
+# ============================================================
+# ANALYZE ONE COIN
+# ============================================================
+
+def analyze_symbol(
+    symbol,
+    bar,
+    horizon_bars
+):
+
+    df = get_okx_candles(
+        symbol,
+        bar=bar,
+        limit=220
+    )
+
+    prediction, uncertainty, latest, model = train_gpr(
+        df,
+        horizon_bars
+    )
+
+    score = calculate_score(
+        prediction,
+        uncertainty,
+        latest
+    )
+
+    signal = (
+        "LONG"
+        if prediction >= 0
+        else "SHORT"
+    )
+
+    confidence = (
+        abs(prediction) /
+        max(uncertainty, 0.01)
+    )
+
+    result = {
+        "COIN": symbol,
+        "SIGNAL": signal,
+        "GPR SCORE": score,
+        "GPR RETURN": prediction,
+        "UNCERTAINTY": uncertainty,
+        "CONFIDENCE": confidence,
+        "PRICE": float(latest["close"]),
+        "RSI": float(latest["rsi14"]),
+        "MOM 6H": float(latest["mom_6"]),
+        "MOM 12H": float(latest["mom_12"]),
+        "MOM 24H": float(latest["mom_24"]),
+        "VOL Z": float(latest["volume_z"]),
+        "EMA12 DIST": float(latest["ema12_dist"]),
+        "EMA24 DIST": float(latest["ema24_dist"]),
+        "CANDLE": latest["datetime"]
+    }
+
+    return result
 
 
 # ============================================================
 # SCAN
 # ============================================================
 
+def run_scan(
+    symbols,
+    timeframe,
+    horizon_bars,
+    workers
+):
+
+    bar = "1H" if timeframe == "1H" else "15m"
+
+    results = []
+    errors = []
+
+    progress = st.progress(0)
+
+    status = st.empty()
+
+    total = len(symbols)
+
+    # --------------------------------------------------------
+    # Sequential execution.
+    # Lebih stabil pada Streamlit Cloud daripada terlalu
+    # banyak request paralel.
+    # --------------------------------------------------------
+
+    for i, symbol in enumerate(symbols):
+
+        status.write(
+            f"Scanning {symbol} "
+            f"({i + 1}/{total})..."
+        )
+
+        try:
+
+            result = analyze_symbol(
+                symbol,
+                bar,
+                horizon_bars
+            )
+
+            results.append(result)
+
+        except Exception as e:
+
+            errors.append({
+                "Symbol": symbol,
+                "Status": str(e)
+            })
+
+        progress.progress(
+            int((i + 1) / total * 100)
+        )
+
+        # Sedikit jeda agar tidak terlalu agresif
+        time.sleep(0.03)
+
+    progress.empty()
+    status.empty()
+
+    return results, errors
+
+
+# ============================================================
+# DISPLAY METRIC
+# ============================================================
+
+def metric_card(title, value, subtitle=""):
+
+    with st.container(border=True):
+
+        st.markdown(
+            f'<div class="metric-title">{title}</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            f'<div class="metric-value">{value}</div>',
+            unsafe_allow_html=True
+        )
+
+        if subtitle:
+            st.caption(subtitle)
+
+
+# ============================================================
+# RUN SCAN
+# ============================================================
+
 if scan_button:
 
-    universe = get_universe()
+    selected_symbols = UNIVERSE[:coin_count]
 
-    selected_symbols = (
-        universe[:coin_count]
+    st.info(
+        f"Mode data: public market data, tanpa API key. "
+        f"Provider OKX · {timeframe} · "
+        f"Horizon {horizon} candle."
     )
-
 
     start_time = time.time()
 
+    with st.spinner(
+        f"Menjalankan GPR Futures Scanner {timeframe}..."
+    ):
 
-    df_result = run_scan(
-
-        selected_symbols,
-
-        horizon,
-
-        workers
-    )
-
-
-    elapsed = (
-        time.time()
-        - start_time
-    )
-
-
-    st.session_state.scan_result = (
-        df_result
-    )
-
-    st.session_state.scan_time = (
-        elapsed
-    )
-
-
-# ============================================================
-# DISPLAY RESULT
-# ============================================================
-
-if st.session_state.scan_result is None:
-
-    st.warning(
-        "Belum ada hasil. "
-        "Tekan **SCAN FUTURES 1H**."
-    )
-
-
-else:
-
-    df = (
-        st.session_state.scan_result
-        .copy()
-    )
-
-
-    # --------------------------------------------------------
-    # VALID / FAILED
-    # --------------------------------------------------------
-
-    success_df = df[
-        df["Status"] == "OK"
-    ].copy()
-
-
-    failed_df = df[
-        df["Status"] != "OK"
-    ].copy()
-
-
-    # --------------------------------------------------------
-    # SORT
-    # --------------------------------------------------------
-
-    ranked = (
-        success_df
-        .copy()
-    )
-
-
-    if not ranked.empty:
-
-        ranked = (
-
-            ranked
-            .sort_values(
-                "GPR Score",
-                ascending=False
-            )
-            .reset_index(
-                drop=True
-            )
+        results, errors = run_scan(
+            selected_symbols,
+            timeframe,
+            horizon,
+            parallel_workers
         )
 
-
-    candidates = ranked[
-        ranked["GPR Score"]
-        >= minimum_score
-    ].copy()
-
+    elapsed = time.time() - start_time
 
     # --------------------------------------------------------
-    # COUNTERS
+    # DATAFRAME
     # --------------------------------------------------------
 
-    universe_count = len(df)
+    if results:
 
-    success_count = len(
-        success_df
-    )
+        df_result = pd.DataFrame(results)
 
-    failed_count = len(
-        failed_df
-    )
+        df_result = df_result.sort_values(
+            "GPR SCORE",
+            ascending=False
+        ).reset_index(drop=True)
 
-    candidate_count = len(
-        candidates
-    )
+        df_result["Rank"] = (
+            np.arange(len(df_result)) + 1
+        )
 
+        # ----------------------------------------------------
+        # SAVE SESSION
+        # ----------------------------------------------------
 
-    if not ranked.empty:
-
-        top_return = ranked.iloc[0][
-            "GPR Return"
-        ]
+        st.session_state["results"] = df_result
+        st.session_state["errors"] = pd.DataFrame(errors)
+        st.session_state["timeframe"] = timeframe
+        st.session_state["horizon"] = horizon
+        st.session_state["elapsed"] = elapsed
 
     else:
 
-        top_return = np.nan
+        st.error(
+            "Tidak ada coin yang berhasil dianalisis."
+        )
+
+        if errors:
+            st.dataframe(
+                pd.DataFrame(errors),
+                use_container_width=True,
+                hide_index=True
+            )
 
 
-    # ========================================================
-    # TOP METRICS
-    # ========================================================
+# ============================================================
+# SHOW RESULTS
+# ============================================================
 
-    c1, c2, c3, c4 = (
-        st.columns(4)
+if "results" in st.session_state:
+
+    df = st.session_state["results"]
+    errors_df = st.session_state.get(
+        "errors",
+        pd.DataFrame()
     )
 
+    active_tf = st.session_state["timeframe"]
+    active_horizon = st.session_state["horizon"]
+    elapsed = st.session_state["elapsed"]
+
+    candidates = df[
+        df["GPR SCORE"] >= minimum_score
+    ].copy()
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    st.success(
+        f"Scan selesai: {len(df)} berhasil, "
+        f"{len(errors_df)} gagal dalam {elapsed:.1f} detik."
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-
-        st.metric(
+        metric_card(
             "UNIVERSE",
-            universe_count,
+            len(df),
             "USDT Perpetual"
         )
 
-
     with c2:
-
-        st.metric(
+        metric_card(
             "TIMEFRAME",
-            "1H",
+            active_tf,
             "Primary timeframe"
         )
 
-
     with c3:
-
-        st.metric(
-            "HORIZON",
-            f"{horizon}H",
-            "GPR forecast"
+        horizon_hours = (
+            active_horizon
+            if active_tf == "1H"
+            else active_horizon * 0.25
         )
 
+        metric_card(
+            "HORIZON",
+            f"{active_horizon} candle",
+            f"≈ {horizon_hours:g} jam"
+        )
 
     with c4:
-
-        st.metric(
+        metric_card(
             "PROVIDER",
             "OKX",
             "Public market data"
         )
 
+    st.divider()
 
-    st.markdown("---")
-
-
-    st.success(
-
-        f"Scan selesai: "
-        f"{success_count} berhasil, "
-        f"{failed_count} gagal "
-        f"dalam "
-        f"{st.session_state.scan_time:.1f} detik."
-    )
-
-
-    # ========================================================
-    # SECOND METRICS
-    # ========================================================
-
-    c1, c2, c3, c4 = (
-        st.columns(4)
-    )
-
+    c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-
-        st.metric(
+        metric_card(
             "BERHASIL DIANALISIS",
-            success_count
+            len(df)
         )
-
 
     with c2:
-
-        st.metric(
-            f"LOLOS SCORE ≥ "
-            f"{minimum_score}",
-            candidate_count
+        metric_card(
+            f"LOLOS SCORE ≥ {minimum_score}",
+            len(candidates)
         )
-
 
     with c3:
-
-        st.metric(
+        metric_card(
             "KANDIDAT",
-            candidate_count
+            min(len(candidates), 10)
         )
-
 
     with c4:
 
-        if np.isfinite(
-            top_return
-        ):
+        if len(df) > 0:
 
-            st.metric(
+            top_return = df.iloc[0]["GPR RETURN"]
 
+            metric_card(
                 "GPR RETURN TERTINGGI",
-
                 f"{top_return:+.2f}%",
-
-                f"Horizon {horizon}H"
+                f"Score {df.iloc[0]['GPR SCORE']:.1f}"
             )
-
-        else:
-
-            st.metric(
-                "GPR RETURN TERTINGGI",
-                "-"
-            )
-
-
-    st.markdown("---")
-
 
     # ========================================================
     # RANKING
     # ========================================================
 
-    st.markdown(
-        '<div class="section-title">'
-        '🏆 GPR Futures Ranking'
-        '</div>',
-        unsafe_allow_html=True
+    st.divider()
+
+    st.subheader("🏆 GPR Futures Ranking")
+
+    display_df = df[
+        [
+            "Rank",
+            "COIN",
+            "SIGNAL",
+            "GPR SCORE",
+            "GPR RETURN",
+            "UNCERTAINTY",
+            "CONFIDENCE",
+            "PRICE",
+            "RSI",
+            "MOM 6H",
+            "MOM 12H",
+            "MOM 24H",
+            "VOL Z"
+        ]
+    ].copy()
+
+    display_df["GPR SCORE"] = display_df[
+        "GPR SCORE"
+    ].round(1)
+
+    display_df["GPR RETURN"] = display_df[
+        "GPR RETURN"
+    ].map(lambda x: f"{x:+.2f}%")
+
+    display_df["UNCERTAINTY"] = display_df[
+        "UNCERTAINTY"
+    ].map(lambda x: f"{x:.2f}%")
+
+    display_df["CONFIDENCE"] = display_df[
+        "CONFIDENCE"
+    ].round(2)
+
+    display_df["PRICE"] = display_df[
+        "PRICE"
+    ].map(lambda x: f"{x:.8g}")
+
+    display_df["RSI"] = display_df[
+        "RSI"
+    ].round(1)
+
+    for col in [
+        "MOM 6H",
+        "MOM 12H",
+        "MOM 24H"
+    ]:
+
+        display_df[col] = display_df[
+            col
+        ].map(lambda x: f"{x:+.2f}%")
+
+    display_df["VOL Z"] = display_df[
+        "VOL Z"
+    ].round(2)
+
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True
     )
 
+    # ========================================================
+    # TOP SIGNALS
+    # ========================================================
 
-    if ranked.empty:
+    st.divider()
 
-        st.warning(
-            "Tidak ada coin yang berhasil dianalisis."
-        )
+    st.subheader("🎯 Top GPR Signals")
 
+    top_n = min(
+        6,
+        len(df)
+    )
 
-    else:
+    top_df = df.head(top_n)
 
-        display_df = (
-            ranked
-            .copy()
-        )
+    columns = st.columns(2)
 
+    for idx, (_, row) in enumerate(
+        top_df.iterrows()
+    ):
 
-        display_df = display_df[
-            display_df["GPR Score"]
-            >= minimum_score
-        ].copy()
+        with columns[idx % 2]:
 
+            with st.container(border=True):
 
-        if display_df.empty:
-
-            st.warning(
-
-                f"Belum ada coin yang "
-                f"mencapai minimum score "
-                f"{minimum_score}. "
-                f"Turunkan threshold "
-                f"untuk melihat kandidat."
-            )
-
-
-        else:
-
-            display_df.insert(
-
-                0,
-
-                "Rank",
-
-                range(
-                    1,
-                    len(display_df) + 1
+                st.markdown(
+                    f"### {row['COIN']}"
                 )
-            )
 
-
-            # ------------------------------------------------
-            # DISPLAY FORMATTING
-            # ------------------------------------------------
-
-            display_df[
-                "GPR Return"
-            ] = display_df[
-                "GPR Return"
-            ].map(
-                lambda x:
-                    f"{x:+.2f}%"
-            )
-
-
-            display_df[
-                "Uncertainty"
-            ] = display_df[
-                "Uncertainty"
-            ].map(
-                lambda x:
-                    f"{x:.2f}%"
-            )
-
-
-            display_df[
-                "Confidence"
-            ] = display_df[
-                "Confidence"
-            ].map(
-                lambda x:
-                    f"{x:.2f}"
-            )
-
-
-            display_df[
-                "Price"
-            ] = display_df[
-                "Price"
-            ].map(
-                lambda x:
-                    f"{x:,.8g}"
-            )
-
-
-            display_df[
-                "RSI"
-            ] = display_df[
-                "RSI"
-            ].map(
-                lambda x:
-                    f"{x:.1f}"
-            )
-
-
-            display_df[
-                "Mom 6H"
-            ] = display_df[
-                "Mom 6H"
-            ].map(
-                lambda x:
-                    f"{x:+.2f}%"
-            )
-
-
-            display_df[
-                "Mom 12H"
-            ] = display_df[
-                "Mom 12H"
-            ].map(
-                lambda x:
-                    f"{x:+.2f}%"
-            )
-
-
-            display_df[
-                "Mom 24H"
-            ] = display_df[
-                "Mom 24H"
-            ].map(
-                lambda x:
-                    f"{x:+.2f}%"
-            )
-
-
-            display_df[
-                "Volume Z"
-            ] = display_df[
-                "Volume Z"
-            ].map(
-                lambda x:
-                    f"{x:+.2f}"
-            )
-
-
-            # ------------------------------------------------
-            # RANKING COLUMNS
-            # ------------------------------------------------
-
-            ranking_columns = [
-
-                "Rank",
-
-                "Symbol",
-
-                "Signal",
-
-                "GPR Score",
-
-                "GPR Return",
-
-                "Uncertainty",
-
-                "Confidence",
-
-                "Price",
-
-                "RSI",
-
-                "Mom 6H",
-
-                "Mom 12H",
-
-                "Mom 24H",
-
-                "Volume Z",
-            ]
-
-
-            st.dataframe(
-
-                display_df[
-                    ranking_columns
-                ],
-
-                use_container_width=True,
-
-                hide_index=True,
-
-                column_config={
-
-                    "Rank":
-                        st.column_config.NumberColumn(
-                            "🏆 Rank",
-                            width="small"
-                        ),
-
-                    "Symbol":
-                        st.column_config.TextColumn(
-                            "COIN"
-                        ),
-
-                    "Signal":
-                        st.column_config.TextColumn(
-                            "SIGNAL"
-                        ),
-
-                    "GPR Score":
-                        st.column_config.NumberColumn(
-                            "GPR SCORE",
-                            format="%.1f"
-                        ),
-
-                    "GPR Return":
-                        st.column_config.TextColumn(
-                            "GPR RETURN"
-                        ),
-
-                    "Uncertainty":
-                        st.column_config.TextColumn(
-                            "UNCERTAINTY"
-                        ),
-
-                    "Confidence":
-                        st.column_config.TextColumn(
-                            "CONFIDENCE"
-                        ),
-
-                    "Price":
-                        st.column_config.TextColumn(
-                            "PRICE"
-                        ),
-
-                    "RSI":
-                        st.column_config.TextColumn(
-                            "RSI"
-                        ),
-
-                    "Mom 6H":
-                        st.column_config.TextColumn(
-                            "MOM 6H"
-                        ),
-
-                    "Mom 12H":
-                        st.column_config.TextColumn(
-                            "MOM 12H"
-                        ),
-
-                    "Mom 24H":
-                        st.column_config.TextColumn(
-                            "MOM 24H"
-                        ),
-
-                    "Volume Z":
-                        st.column_config.TextColumn(
-                            "VOL Z"
-                        ),
-                }
-            )
-
-
-    # ========================================================
-    # TOP GPR SIGNALS
-    #
-    # PENTING:
-    # Tidak menggunakan HTML <div>.
-    # Menggunakan native Streamlit sehingga tidak
-    # akan muncul sebagai source code lagi.
-    # ========================================================
-
-    if not candidates.empty:
-
-        st.markdown("---")
-
-        st.markdown(
-            '<div class="section-title">'
-            '🎯 Top GPR Signals'
-            '</div>',
-            unsafe_allow_html=True
-        )
-
-
-        top_n = min(
-            5,
-            len(candidates)
-        )
-
-
-        top = (
-            candidates
-            .head(top_n)
-        )
-
-
-        cols = st.columns(
-            top_n
-        )
-
-
-        for col, (_, row) in zip(
-            cols,
-            top.iterrows()
-        ):
-
-            with col:
-
-                signal = row[
-                    "Signal"
-                ]
-
+                signal = row["SIGNAL"]
 
                 if signal == "LONG":
-
-                    signal_text = (
-                        "🟢 LONG"
-                    )
-
-                elif signal == "SHORT":
-
-                    signal_text = (
-                        "🔴 SHORT"
-                    )
-
-                else:
-
-                    signal_text = (
-                        "🟡 NEUTRAL"
-                    )
-
-
-                # Native Streamlit card
-                with st.container(
-                    border=True
-                ):
-
                     st.markdown(
-                        f"### {row['Symbol']}"
+                        "🟢 **LONG**"
+                    )
+                else:
+                    st.markdown(
+                        "🔴 **SHORT**"
                     )
 
+                a, b = st.columns(2)
+
+                with a:
+                    st.metric(
+                        "GPR Score",
+                        f"{row['GPR SCORE']:.1f}"
+                    )
 
                     st.metric(
-
-                        "GPR SCORE",
-
-                        f"{row['GPR Score']:.1f}"
+                        "GPR Return",
+                        f"{row['GPR RETURN']:+.2f}%"
                     )
 
-
-                    st.write(
-                        f"**Signal:** "
-                        f"{signal_text}"
+                with b:
+                    st.metric(
+                        "Uncertainty",
+                        f"{row['UNCERTAINTY']:.2f}%"
                     )
 
-
-                    st.write(
-
-                        f"**GPR Return:** "
-                        f"{row['GPR Return']:+.2f}%"
+                    st.metric(
+                        "Confidence",
+                        f"{row['CONFIDENCE']:.2f}"
                     )
-
-
-                    st.write(
-
-                        f"**Uncertainty:** "
-                        f"{row['Uncertainty']:.2f}%"
-                    )
-
-
-                    st.write(
-
-                        f"**Confidence:** "
-                        f"{row['Confidence']:.2f}"
-                    )
-
 
     # ========================================================
     # DETAIL ANALYSIS
     # ========================================================
 
-    st.markdown("---")
+    st.divider()
 
+    st.subheader("🔎 Detail Analysis")
 
-    st.markdown(
-        '<div class="section-title">'
-        '🔎 Detail Analysis'
-        '</div>',
-        unsafe_allow_html=True
+    selected_coin = st.selectbox(
+        "Pilih coin",
+        df["COIN"].tolist()
     )
 
+    selected = df[
+        df["COIN"] == selected_coin
+    ].iloc[0]
 
-    if not ranked.empty:
+    c1, c2, c3, c4 = st.columns(4)
 
-        selected_symbol = (
-            st.selectbox(
-                "Pilih coin",
-                ranked[
-                    "Symbol"
-                ].tolist()
-            )
+    with c1:
+        st.metric(
+            "SIGNAL",
+            selected["SIGNAL"]
         )
 
-
-        detail = ranked[
-            ranked["Symbol"]
-            == selected_symbol
-        ].iloc[0]
-
-
-        d1, d2, d3, d4 = (
-            st.columns(4)
+    with c2:
+        st.metric(
+            "GPR SCORE",
+            f"{selected['GPR SCORE']:.1f}"
         )
 
-
-        with d1:
-
-            st.metric(
-                "SIGNAL",
-                detail["Signal"]
-            )
-
-
-        with d2:
-
-            st.metric(
-                "GPR SCORE",
-                f'{detail["GPR Score"]:.1f}'
-            )
-
-
-        with d3:
-
-            st.metric(
-                "FORECAST",
-                f'{detail["GPR Return"]:+.2f}%'
-            )
-
-
-        with d4:
-
-            st.metric(
-                "UNCERTAINTY",
-                f'{detail["Uncertainty"]:.2f}%'
-            )
-
-
-        st.markdown("")
-
-
-        d1, d2, d3, d4 = (
-            st.columns(4)
+    with c3:
+        st.metric(
+            "FORECAST",
+            f"{selected['GPR RETURN']:+.2f}%"
         )
 
-
-        with d1:
-
-            st.write(
-                f"**Harga**  \n"
-                f"{detail['Price']:,.8g}"
-            )
-
-
-        with d2:
-
-            st.write(
-                f"**RSI 14**  \n"
-                f"{detail['RSI']:.1f}"
-            )
-
-
-        with d3:
-
-            st.write(
-                f"**Momentum 6H**  \n"
-                f"{detail['Mom 6H']:+.2f}%"
-            )
-
-
-        with d4:
-
-            st.write(
-                f"**Momentum 12H**  \n"
-                f"{detail['Mom 12H']:+.2f}%"
-            )
-
-
-        d1, d2, d3, d4 = (
-            st.columns(4)
+    with c4:
+        st.metric(
+            "UNCERTAINTY",
+            f"{selected['UNCERTAINTY']:.2f}%"
         )
 
+    st.divider()
 
-        with d1:
+    c1, c2, c3, c4 = st.columns(4)
 
-            st.write(
-                f"**Momentum 24H**  \n"
-                f"{detail['Mom 24H']:+.2f}%"
-            )
-
-
-        with d2:
-
-            st.write(
-                f"**Volume Z**  \n"
-                f"{detail['Volume Z']:+.2f}"
-            )
-
-
-        with d3:
-
-            st.write(
-                f"**EMA12 Distance**  \n"
-                f"{detail['EMA12 Dist']:+.2f}%"
-            )
-
-
-        with d4:
-
-            st.write(
-                f"**EMA24 Distance**  \n"
-                f"{detail['EMA24 Dist']:+.2f}%"
-            )
-
-
-        st.caption(
-            f"Last confirmed candle: "
-            f"{detail['Last Candle']}"
+    with c1:
+        st.metric(
+            "Harga",
+            f"{selected['PRICE']:.8g}"
         )
 
+        st.metric(
+            "Momentum 24H",
+            f"{selected['MOM 24H']:+.2f}%"
+        )
+
+    with c2:
+        st.metric(
+            "RSI 14",
+            f"{selected['RSI']:.1f}"
+        )
+
+        st.metric(
+            "Volume Z",
+            f"{selected['VOL Z']:.2f}"
+        )
+
+    with c3:
+        st.metric(
+            "Momentum 6H",
+            f"{selected['MOM 6H']:+.2f}%"
+        )
+
+        st.metric(
+            "EMA12 Distance",
+            f"{selected['EMA12 DIST']:+.2f}%"
+        )
+
+    with c4:
+        st.metric(
+            "Momentum 12H",
+            f"{selected['MOM 12H']:+.2f}%"
+        )
+
+        st.metric(
+            "EMA24 Distance",
+            f"{selected['EMA24 DIST']:+.2f}%"
+        )
+
+    st.caption(
+        f"Last confirmed candle: "
+        f"{selected['CANDLE']}"
+    )
 
     # ========================================================
     # DIAGNOSTIC
     # ========================================================
 
-    st.markdown("---")
-
+    st.divider()
 
     with st.expander(
         "📋 ERROR / DIAGNOSTIC"
     ):
 
-        if failed_df.empty:
+        if errors_df.empty:
 
             st.success(
-                "Tidak ada error "
-                "pada coin yang discan."
+                "Tidak ada error pada coin yang dianalisis."
             )
-
 
         else:
 
-            error_display = (
-                failed_df[
-                    [
-                        "Symbol",
-                        "Status"
-                    ]
-                ]
-                .copy()
-            )
-
-
             st.dataframe(
-
-                error_display,
-
+                errors_df,
                 use_container_width=True,
-
                 hide_index=True
             )
+
+    # ========================================================
+    # EXPORT
+    # ========================================================
+
+    st.divider()
+
+    csv = df.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    st.download_button(
+        "⬇️ Download Ranking CSV",
+        data=csv,
+        file_name=(
+            f"gpr_crypto_{active_tf}.csv"
+        ),
+        mime="text/csv"
+    )
+
+else:
+
+    # ========================================================
+    # INITIAL STATE
+    # ========================================================
+
+    st.info(
+        f"Belum ada hasil. Tekan "
+        f"**SCAN FUTURES {timeframe}**."
+    )
+
+    st.markdown(
+        """
+        ### Struktur scanner
+
+        **GPR Crypto Futures Scanner**
+
+        - Primary: **1H**
+        - Secondary: **15m**
+        - Provider: **OKX public market data**
+        - API key: **tidak diperlukan**
+        - Model: **Gaussian Process Regression**
+        - Output: **LONG / SHORT**
+        - Ranking: **GPR Score**
+        - Forecast: **GPR Return**
+        - Risk: **Uncertainty**
+        - Confidence: **Prediction / Uncertainty**
+        """
+    )
 
 
 # ============================================================
 # FOOTER
 # ============================================================
 
-st.markdown("---")
-
+st.divider()
 
 st.caption(
-
-    "GPR Crypto Futures Scanner · "
-    "USDT Perpetual · 1H · "
-    "Public Market Data · "
-    "Research Prototype"
+    "GPR Crypto Futures Scanner · USDT Perpetual · "
+    "Public Market Data · Research Prototype"
 )
