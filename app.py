@@ -13,140 +13,402 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="GPR Crypto Futures 1H",
+    page_title="GPR Crypto Futures Scanner",
     page_icon="📈",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-CACHE_TTL = 300
+CACHE_SECONDS = 300
+REQUEST_TIMEOUT = 15
 
-# IMPORTANT:
-# Untuk Indonesia gunakan endpoint resmi Bybit Indonesia.
-# Tidak perlu API KEY untuk market data publik.
-BYBIT_BASE = "https://api.bybit.id"
+# Target utama
+TIMEFRAME = "1h"
+BYBIT_INTERVAL = "60"
+BINANCE_INTERVAL = "1h"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 GPR-Crypto-Futures/2.0",
-    "Accept": "application/json",
-}
-
-# Kita sengaja TIDAK mengambil instruments-info setiap scan.
-# Universe dibuat dari simbol USDT perpetual yang umum/liquid.
-CORE_SYMBOLS = """
-BTCUSDT ETHUSDT SOLUSDT XRPUSDT BNBUSDT DOGEUSDT ADAUSDT TRXUSDT
-AVAXUSDT LINKUSDT SUIUSDT TONUSDT DOTUSDT BCHUSDT LTCUSDT SHIBUSDT
-NEARUSDT APTUSDT ICPUSDT ETCUSDT XLMUSDT HBARUSDT FILUSDT ATOMUSDT
-ARBUSDT OPUSDT INJUSDT AAVEUSDT UNIUSDT RENDERUSDT TAOUSDT IMXUSDT
-GRTUSDT ALGOUSDT VETUSDT EOSUSDT XTZUSDT PEPEUSDT MKRUSDT
-SEIUSDT TIAUSDT JUPUSDT WIFUSDT BONKUSDT FLOKIUSDT FETUSDT
-ENAUSDT ONDOUSDT STXUSDT KASUSDT THETAUSDT CRVUSDT
-LDOUSDT RUNEUSDT DYDXUSDT GMXUSDT COMPUSDT SNXUSDT
-MANAUSDT SANDUSDT AXSUSDT GALAUSDT APEUSDT
-WLDUSDT STRKUSDT ZKUSDT NOTUSDT BOMEUSDT
-ORDIUSDT 1000SATSUSDT RATSUSDT
-"""
-
-SYMBOLS = list(dict.fromkeys(CORE_SYMBOLS.split()))
+# Minimal candle untuk GPR
+MIN_CANDLES = 100
 
 
 # ============================================================
 # HTTP SESSION
 # ============================================================
 
-session = requests.Session()
-session.headers.update(HEADERS)
+SESSION = requests.Session()
 
-
-def bybit_get(path, params, timeout=15):
-    """
-    Public GET request dengan retry ringan.
-    Tidak menggunakan API key.
-    """
-
-    url = BYBIT_BASE + path
-
-    last_error = None
-
-    for attempt in range(3):
-        try:
-            r = session.get(
-                url,
-                params=params,
-                timeout=timeout,
-            )
-
-            # rate limit
-            if r.status_code == 429:
-                time.sleep(2 + attempt * 2)
-                continue
-
-            # server/network issue
-            r.raise_for_status()
-
-            data = r.json()
-
-            if data.get("retCode") != 0:
-                raise RuntimeError(
-                    f"Bybit retCode={data.get('retCode')} "
-                    f"msg={data.get('retMsg')}"
-                )
-
-            return data
-
-        except Exception as exc:
-            last_error = exc
-            time.sleep(1.0 + attempt)
-
-    raise RuntimeError(str(last_error))
+SESSION.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) "
+        "AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"
+    ),
+    "Accept": "application/json",
+})
 
 
 # ============================================================
-# GET 1H FUTURES DATA
+# BYBIT
 # ============================================================
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_klines(symbol, limit=250):
+BYBIT_BASE = "https://api.bybit.com"
 
-    payload = bybit_get(
-        "/v5/market/kline",
-        {
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def get_bybit_symbols():
+    """
+    Ambil seluruh USDT Perpetual aktif dari Bybit.
+    Menggunakan pagination cursor karena linear symbols > 500.
+    """
+
+    symbols = []
+    cursor = None
+
+    for _ in range(10):
+
+        params = {
             "category": "linear",
-            "symbol": symbol,
-            "interval": "60",
-            "limit": limit,
-        },
-    )
+            "status": "Trading",
+            "limit": 1000,
+        }
 
-    rows = payload.get("result", {}).get("list", [])
+        if cursor:
+            params["cursor"] = cursor
 
-    if not rows:
-        raise ValueError("Kline kosong")
-
-    # Bybit mengembalikan newest -> oldest
-    rows = list(reversed(rows))
-
-    data = []
-
-    for row in rows:
-        data.append(
-            {
-                "time": pd.to_datetime(
-                    int(row[0]),
-                    unit="ms",
-                    utc=True,
-                ),
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "volume": float(row[5]),
-                "turnover": float(row[6]),
-            }
+        r = SESSION.get(
+            f"{BYBIT_BASE}/v5/market/instruments-info",
+            params=params,
+            timeout=REQUEST_TIMEOUT,
         )
 
-    df = pd.DataFrame(data)
+        r.raise_for_status()
 
-    return df.dropna().reset_index(drop=True)
+        data = r.json()
+
+        if data.get("retCode") != 0:
+            raise RuntimeError(
+                f"Bybit instruments error: {data.get('retMsg')}"
+            )
+
+        result = data.get("result", {})
+
+        for item in result.get("list", []):
+
+            symbol = item.get("symbol", "")
+            contract_type = item.get("contractType", "")
+            quote_coin = item.get("quoteCoin", "")
+            status = item.get("status", "")
+
+            if (
+                status == "Trading"
+                and quote_coin == "USDT"
+                and contract_type == "LinearPerpetual"
+                and symbol.endswith("USDT")
+            ):
+                symbols.append(symbol)
+
+        cursor = result.get("nextPageCursor")
+
+        if not cursor:
+            break
+
+    symbols = sorted(set(symbols))
+
+    if len(symbols) < 50:
+        raise RuntimeError(
+            f"Bybit hanya mengembalikan {len(symbols)} perpetual."
+        )
+
+    return symbols
+
+
+def get_bybit_klines(symbol, limit=250):
+
+    params = {
+        "category": "linear",
+        "symbol": symbol,
+        "interval": BYBIT_INTERVAL,
+        "limit": limit,
+    }
+
+    r = SESSION.get(
+        f"{BYBIT_BASE}/v5/market/kline",
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    r.raise_for_status()
+
+    data = r.json()
+
+    if data.get("retCode") != 0:
+        raise RuntimeError(
+            f"Bybit kline {symbol}: {data.get('retMsg')}"
+        )
+
+    rows = data.get("result", {}).get("list", [])
+
+    if not rows:
+        raise RuntimeError(f"Bybit tidak punya candle untuk {symbol}")
+
+    # Bybit:
+    # [timestamp, open, high, low, close, volume, turnover]
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "turnover",
+        ],
+    )
+
+    df["time"] = pd.to_datetime(
+        pd.to_numeric(df["time"]),
+        unit="ms",
+        utc=True,
+    )
+
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.sort_values("time")
+    df = df.dropna(
+        subset=[
+            "open",
+            "high",
+            "low",
+            "close",
+        ]
+    )
+
+    return df.reset_index(drop=True)
+
+
+# ============================================================
+# BINANCE FUTURES FALLBACK
+# ============================================================
+
+BINANCE_BASE = "https://fapi.binance.com"
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def get_binance_symbols():
+
+    r = SESSION.get(
+        f"{BINANCE_BASE}/fapi/v1/exchangeInfo",
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    r.raise_for_status()
+
+    data = r.json()
+
+    symbols = []
+
+    for item in data.get("symbols", []):
+
+        if (
+            item.get("status") == "TRADING"
+            and item.get("contractType") == "PERPETUAL"
+            and item.get("quoteAsset") == "USDT"
+        ):
+            symbol = item.get("symbol")
+
+            if symbol:
+                symbols.append(symbol)
+
+    symbols = sorted(set(symbols))
+
+    if len(symbols) < 50:
+        raise RuntimeError(
+            f"Binance hanya mengembalikan {len(symbols)} perpetual."
+        )
+
+    return symbols
+
+
+def get_binance_klines(symbol, limit=250):
+
+    params = {
+        "symbol": symbol,
+        "interval": BINANCE_INTERVAL,
+        "limit": min(limit, 1000),
+    }
+
+    r = SESSION.get(
+        f"{BINANCE_BASE}/fapi/v1/klines",
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    r.raise_for_status()
+
+    rows = r.json()
+
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError(
+            f"Binance tidak punya candle untuk {symbol}"
+        )
+
+    # Binance:
+    # open time
+    # open
+    # high
+    # low
+    # close
+    # volume
+    # ...
+
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "ignore",
+        ],
+    )
+
+    df["time"] = pd.to_datetime(
+        pd.to_numeric(df["time"]),
+        unit="ms",
+        utc=True,
+    )
+
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]:
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce",
+        )
+
+    df = df.sort_values("time")
+
+    df = df.dropna(
+        subset=[
+            "open",
+            "high",
+            "low",
+            "close",
+        ]
+    )
+
+    return df[
+        [
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+    ].reset_index(drop=True)
+
+
+# ============================================================
+# PROVIDER ROUTER
+# ============================================================
+
+def get_symbols():
+
+    errors = []
+
+    # Primary
+    try:
+        symbols = get_bybit_symbols()
+
+        return symbols, "BYBIT"
+
+    except Exception as exc:
+
+        errors.append(
+            f"Bybit: {type(exc).__name__}: {str(exc)[:100]}"
+        )
+
+    # Fallback
+    try:
+        symbols = get_binance_symbols()
+
+        return symbols, "BINANCE"
+
+    except Exception as exc:
+
+        errors.append(
+            f"Binance: {type(exc).__name__}: {str(exc)[:100]}"
+        )
+
+    raise RuntimeError(
+        "Semua provider gagal mengambil universe.\n"
+        + "\n".join(errors)
+    )
+
+
+def get_candles(symbol, provider, limit=250):
+
+    errors = []
+
+    if provider == "BYBIT":
+
+        try:
+            return get_bybit_klines(symbol, limit)
+
+        except Exception as exc:
+
+            errors.append(
+                f"Bybit: {type(exc).__name__}: {str(exc)[:100]}"
+            )
+
+            # Coba Binance untuk simbol yang sama
+            try:
+
+                return get_binance_klines(
+                    symbol,
+                    limit,
+                )
+
+            except Exception as exc2:
+
+                errors.append(
+                    f"Binance: {type(exc2).__name__}: {str(exc2)[:100]}"
+                )
+
+    elif provider == "BINANCE":
+
+        try:
+            return get_binance_klines(symbol, limit)
+
+        except Exception as exc:
+
+            errors.append(
+                f"Binance: {type(exc).__name__}: {str(exc)[:100]}"
+            )
+
+    raise RuntimeError(
+        f"{symbol}: tidak mendapatkan candle.\n"
+        + " | ".join(errors)
+    )
 
 
 # ============================================================
@@ -154,6 +416,7 @@ def get_klines(symbol, limit=250):
 # ============================================================
 
 def ema(series, length):
+
     return series.ewm(
         span=length,
         adjust=False,
@@ -161,7 +424,12 @@ def ema(series, length):
     ).mean()
 
 
-def matern32_kernel(x, z, amplitude, scale):
+def matern32_kernel(
+    x,
+    z,
+    amplitude,
+    scale,
+):
 
     d = x - z
 
@@ -175,7 +443,10 @@ def matern32_kernel(x, z, amplitude, scale):
 
     u = (
         math.sqrt(
-            3.0 * max(float(distance2), 0.0)
+            3.0 * max(
+                float(distance2),
+                0.0,
+            )
         )
         / scale
     )
@@ -200,10 +471,10 @@ def pine_rma(values, length):
         dtype=float,
     )
 
-    if length <= 0:
-        return out
-
-    if len(values) < length:
+    if (
+        length <= 0
+        or len(values) < length
+    ):
         return out
 
     valid_idx = np.flatnonzero(
@@ -255,20 +526,19 @@ def pine_rma(values, length):
 
                 out[i] = (
                     alpha * values[i]
-                    + (1 - alpha) * prev
+                    + (1.0 - alpha) * prev
                 )
 
     return out
 
 
 # ============================================================
-# GPR PROFILE
+# GPR PARAMETERS
 # ============================================================
 
 def gpr_profile():
 
-    # FIXED:
-    # Target utama hanya 1H.
+    # KHUSUS TARGET 1H
     return dict(
         training=35,
         momentum_len=5,
@@ -282,13 +552,12 @@ def gpr_profile():
 
 
 # ============================================================
-# GPR PROJECTOR
+# GPR MODEL
 # ============================================================
 
 def gpr_project(
     df,
     horizon=10,
-    validation_candles=3,
     training=35,
     momentum_len=5,
     vol_len=20,
@@ -297,15 +566,24 @@ def gpr_project(
     kernel_scale=1.6,
     noise_ratio=0.65,
     volume_fade=0.50,
+    band_sigma=1.96,
+    validation_candles=3,
 ):
 
-    minimum = max(
+    min_needed = max(
         training
         + vol_len
         + ema_slow
         + 10,
-        60,
+        80,
     )
+
+    if len(df) < min_needed + validation_candles:
+
+        raise ValueError(
+            f"Candle hanya {len(df)}; "
+            f"minimal {min_needed + validation_candles}"
+        )
 
     idx = (
         len(df)
@@ -313,19 +591,33 @@ def gpr_project(
         - validation_candles
     )
 
-    if idx < minimum:
-        raise ValueError(
-            f"Candle tidak cukup: "
-            f"{len(df)} / perlu {minimum + validation_candles}"
-        )
+    close = (
+        df["close"]
+        .astype(float)
+        .to_numpy()
+    )
 
-    close = df["close"].astype(float).to_numpy()
-    volume = df["volume"].astype(float).to_numpy()
-    high = df["high"].astype(float).to_numpy()
-    low = df["low"].astype(float).to_numpy()
+    volume = (
+        df["volume"]
+        .fillna(0)
+        .astype(float)
+        .to_numpy()
+    )
+
+    high = (
+        df["high"]
+        .astype(float)
+        .to_numpy()
+    )
+
+    low = (
+        df["low"]
+        .astype(float)
+        .to_numpy()
+    )
 
     # --------------------------------------------------------
-    # RETURNS
+    # RETURN
     # --------------------------------------------------------
 
     logret = np.full(
@@ -334,12 +626,22 @@ def gpr_project(
     )
 
     logret[1:] = np.log(
-        np.maximum(close[1:], 1e-12)
+        np.maximum(
+            close[1:],
+            1e-12,
+        )
         /
-        np.maximum(close[:-1], 1e-12)
+        np.maximum(
+            close[:-1],
+            1e-12,
+        )
     )
 
     ret_series = pd.Series(logret)
+
+    # --------------------------------------------------------
+    # MOMENTUM
+    # --------------------------------------------------------
 
     momentum = (
         ret_series
@@ -351,6 +653,10 @@ def gpr_project(
         .mean()
         .to_numpy()
     )
+
+    # --------------------------------------------------------
+    # VOLATILITY
+    # --------------------------------------------------------
 
     volatility = (
         ret_series
@@ -392,10 +698,8 @@ def gpr_project(
 
     valid = (
         (volume > 0)
-        &
-        (avg_volume > 0)
-        &
-        np.isfinite(avg_volume)
+        & (avg_volume > 0)
+        & np.isfinite(avg_volume)
     )
 
     rel_volume[valid] = np.log(
@@ -405,7 +709,7 @@ def gpr_project(
     )
 
     # --------------------------------------------------------
-    # EMA DIRECTION
+    # EMA
     # --------------------------------------------------------
 
     fast = ema(
@@ -471,21 +775,20 @@ def gpr_project(
         not np.isfinite(
             volatility[idx]
         )
-        or
-        not np.isfinite(
+        or not np.isfinite(
             atr[idx]
         )
-        or
-        not np.isfinite(
+        or not np.isfinite(
             logret[idx]
         )
     ):
+
         raise ValueError(
             "Indikator belum siap."
         )
 
     # ========================================================
-    # TRAINING DATA
+    # TRAINING SET
     # ========================================================
 
     X = []
@@ -506,31 +809,28 @@ def gpr_project(
 
         if (
             feature_idx < 1
-            or
-            not np.isfinite(
+            or not np.isfinite(
                 logret[target_idx]
             )
         ):
             continue
 
-        X.append(
-            [
-                logret[feature_idx]
-                / vol_ref,
+        X.append([
+            logret[feature_idx]
+            / vol_ref,
 
-                momentum[feature_idx]
-                / vol_ref,
+            momentum[feature_idx]
+            / vol_ref,
 
-                rel_volume[feature_idx],
+            rel_volume[feature_idx],
 
-                volatility[feature_idx]
-                / vol_ref
-                - 1.0,
+            volatility[feature_idx]
+            / vol_ref
+            - 1.0,
 
-                direction[feature_idx]
-                / vol_ref,
-            ]
-        )
+            direction[feature_idx]
+            / vol_ref,
+        ])
 
         y.append(
             logret[target_idx]
@@ -549,12 +849,13 @@ def gpr_project(
     n = len(y)
 
     if n < 15:
+
         raise ValueError(
             "Training sample GPR terlalu sedikit."
         )
 
     # ========================================================
-    # KERNEL MATRIX
+    # GAUSSIAN PROCESS
     # ========================================================
 
     signal_var = max(
@@ -627,7 +928,7 @@ def gpr_project(
         )
 
     # ========================================================
-    # RECURSIVE FORECAST
+    # FORECAST
     # ========================================================
 
     price_start = float(
@@ -661,6 +962,7 @@ def gpr_project(
     )
 
     cumulative_return = 0.0
+
     cumulative_variance = 0.0
 
     predictions = []
@@ -678,52 +980,50 @@ def gpr_project(
 
         assumed_vol = (
             vol_ref
-            +
-            (
+            + (
                 vol_prev
                 - vol_ref
             )
             * fade
         )
 
-        x_star = np.array(
-            [
-                ret_prev / vol_ref,
+        x_star = np.array([
 
-                mom_prev / vol_ref,
+            ret_prev
+            / vol_ref,
 
-                volume_prev * fade,
+            mom_prev
+            / vol_ref,
 
-                assumed_vol / vol_ref
-                - 1.0,
+            volume_prev
+            * fade,
 
+            assumed_vol
+            / vol_ref
+            - 1.0,
+
+            (
                 (
-                    (
-                        fast_prev
-                        - slow_prev
-                    )
-                    /
-                    max(
-                        price_prev,
-                        1e-12,
-                    )
+                    fast_prev
+                    - slow_prev
                 )
-                /
-                vol_ref,
-            ]
-        )
+                / max(
+                    price_prev,
+                    1e-12,
+                )
+            )
+            / vol_ref,
+        ])
 
-        kstar = np.array(
-            [
-                matern32_kernel(
-                    X[i],
-                    x_star,
-                    signal_var,
-                    kernel_scale,
-                )
-                for i in range(n)
-            ]
-        )
+        kstar = np.array([
+            matern32_kernel(
+                X[i],
+                x_star,
+                signal_var,
+                kernel_scale,
+            )
+            for i in range(n)
+        ])
 
         pred_ret = float(
             kstar @ alpha
@@ -765,11 +1065,10 @@ def gpr_project(
             )
         )
 
-        # GPR confidence band
         upper = (
             price_pred
             * math.exp(
-                1.96
+                band_sigma
                 * sigma_cum
             )
         )
@@ -777,7 +1076,7 @@ def gpr_project(
         lower = (
             price_pred
             * math.exp(
-                -1.96
+                -band_sigma
                 * sigma_cum
             )
         )
@@ -789,83 +1088,134 @@ def gpr_project(
         )
 
         actual_price = (
-            float(close[real_idx])
+            float(
+                close[real_idx]
+            )
             if real_idx < len(df)
             else None
         )
 
-        predictions.append(
-            {
-                "step": h + 1,
-                "is_future": (
-                    actual_price is None
-                ),
-                "price": price_pred,
-                "actual_price": actual_price,
-                "upper": upper,
-                "lower": lower,
-                "sigma_cum": sigma_cum,
-            }
-        )
+        predictions.append({
 
-        # recursive state update
+            "step": h + 1,
+
+            "is_future":
+                actual_price is None,
+
+            "price":
+                price_pred,
+
+            "actual_price":
+                actual_price,
+
+            "upper":
+                upper,
+
+            "lower":
+                lower,
+
+            "sigma_cum":
+                sigma_cum,
+        })
 
         price_prev = price_pred
+
         ret_prev = pred_ret
 
         a_m = (
             2.0
             /
-            (
-                momentum_len
-                + 1.0
-            )
+            (momentum_len + 1.0)
         )
 
         mom_prev = (
             a_m * pred_ret
             +
-            (
-                1.0 - a_m
-            )
+            (1.0 - a_m)
             * mom_prev
         )
 
         a_f = (
             2.0
             /
-            (
-                ema_fast
-                + 1.0
-            )
+            (ema_fast + 1.0)
         )
 
         a_s = (
             2.0
             /
-            (
-                ema_slow
-                + 1.0
-            )
+            (ema_slow + 1.0)
         )
 
         fast_prev = (
             a_f * price_pred
             +
-            (
-                1.0 - a_f
-            )
+            (1.0 - a_f)
             * fast_prev
         )
 
         slow_prev = (
             a_s * price_pred
             +
-            (
-                1.0 - a_s
-            )
+            (1.0 - a_s)
             * slow_prev
         )
+
+    # ========================================================
+    # VALIDATION
+    # ========================================================
+
+    validation_errors = []
+    hits = 0
+
+    for p in predictions:
+
+        if (
+            not p["is_future"]
+            and p["actual_price"]
+            is not None
+        ):
+
+            err = (
+                abs(
+                    p["price"]
+                    - p["actual_price"]
+                )
+                /
+                max(
+                    p["actual_price"],
+                    1e-12,
+                )
+            )
+
+            validation_errors.append(
+                err
+            )
+
+            if (
+                p["lower"]
+                <= p["actual_price"]
+                <= p["upper"]
+            ):
+                hits += 1
+
+    val_count = len(
+        validation_errors
+    )
+
+    validation_mape = (
+        np.mean(
+            validation_errors
+        )
+        if val_count
+        else 1.0
+    )
+
+    validation_hit_rate = (
+        hits / val_count
+        if val_count
+        else 0.0
+    )
 
     # ========================================================
     # CURRENT STATE
@@ -889,82 +1239,19 @@ def gpr_project(
         volume[-1]
     )
 
-    vol_avg = (
-        float(avg_volume[-1])
-        if np.isfinite(
-            avg_volume[-1]
-        )
-        else 0.0
-    )
+    vol_avg_now = float(
+        avg_volume[-1]
+    ) if np.isfinite(
+        avg_volume[-1]
+    ) else 0.0
 
     relative_volume = (
-        vol_now / vol_avg
-        if vol_avg > 0
-        else 0.0
-    )
-
-    # ========================================================
-    # VALIDATION T-3
-    # ========================================================
-
-    errors = []
-    hits = 0
-
-    for p in predictions:
-
-        if (
-            not p["is_future"]
-            and
-            p["actual_price"]
-            is not None
-        ):
-
-            error = (
-                abs(
-                    p["price"]
-                    -
-                    p["actual_price"]
-                )
-                /
-                max(
-                    p["actual_price"],
-                    1e-12,
-                )
-            )
-
-            errors.append(error)
-
-            if (
-                p["lower"]
-                <=
-                p["actual_price"]
-                <=
-                p["upper"]
-            ):
-                hits += 1
-
-    val_count = len(errors)
-
-    validation_mape = (
-        np.mean(errors)
-        if val_count
-        else 1.0
-    )
-
-    validation_hit_rate = (
-        hits / val_count
-        if val_count
+        vol_now / vol_avg_now
+        if vol_avg_now > 0
         else 0.0
     )
 
     final = predictions[-1]
-
-    gpr_return = (
-        final["price"]
-        /
-        latest_price
-        - 1.0
-    ) * 100
 
     sigma_final = math.sqrt(
         max(
@@ -974,36 +1261,60 @@ def gpr_project(
     )
 
     uncertainty = (
-        100
-        *
-        sigma_final
+        100.0
+        * sigma_final
         /
         (
             abs(
                 cumulative_return
             )
-            +
-            sigma_final
-            +
-            1e-10
+            + sigma_final
+            + 1e-10
         )
     )
 
+    future_return = (
+        final["price"]
+        /
+        latest_price
+        - 1.0
+    ) * 100.0
+
     return {
-        "price": latest_price,
-        "trend": trend,
-        "momentum": (
-            "POSITIVE"
-            if mom_now > 0
-            else "NEGATIVE"
-        ),
-        "relative_volume": relative_volume,
-        "gpr_return_pct": gpr_return,
-        "uncertainty_pct": uncertainty,
-        "validation_mape": validation_mape,
-        "validation_hit_rate": validation_hit_rate,
-        "projected_price": final["price"],
-        "predictions": predictions,
+
+        "price":
+            latest_price,
+
+        "trend":
+            trend,
+
+        "momentum":
+            (
+                "POSITIVE"
+                if mom_now > 0
+                else "NEGATIVE"
+            ),
+
+        "relative_volume":
+            relative_volume,
+
+        "gpr_return_pct":
+            future_return,
+
+        "uncertainty_pct":
+            uncertainty,
+
+        "projected_price":
+            final["price"],
+
+        "validation_mape":
+            validation_mape,
+
+        "validation_hit_rate":
+            validation_hit_rate,
+
+        "predictions":
+            predictions,
     }
 
 
@@ -1058,14 +1369,10 @@ def calculate_score(result):
 
     score = (
         hit_score
-        +
-        mape_score
-        +
-        trend_score
-        +
-        momentum_score
-        +
-        return_score
+        + mape_score
+        + trend_score
+        + momentum_score
+        + return_score
     )
 
     return round(
@@ -1080,134 +1387,263 @@ def calculate_score(result):
     )
 
 
+def make_signal(result):
+
+    score = result["score"]
+
+    ret = result[
+        "gpr_return_pct"
+    ]
+
+    hit = result[
+        "validation_hit_rate"
+    ]
+
+    trend = result[
+        "trend"
+    ]
+
+    momentum = result[
+        "momentum"
+    ]
+
+    # ========================================================
+    # KANDIDAT LONG
+    # ========================================================
+
+    if (
+        score >= 75
+        and trend == "BULLISH"
+        and momentum == "POSITIVE"
+        and ret > 0
+        and hit >= 0.66
+    ):
+        return "LONG CANDIDATE"
+
+    # ========================================================
+    # KANDIDAT SHORT
+    # ========================================================
+
+    if (
+        score >= 75
+        and trend == "BEARISH"
+        and momentum == "NEGATIVE"
+        and ret < 0
+        and hit >= 0.66
+    ):
+        return "SHORT CANDIDATE"
+
+    # ========================================================
+    # WATCH
+    # ========================================================
+
+    if score >= 60:
+        return "WATCH"
+
+    return "AVOID"
+
+
 # ============================================================
-# SINGLE SYMBOL
+# ANALYZE
 # ============================================================
 
-def analyze_symbol(symbol):
+def analyze_symbol(
+    symbol,
+    provider,
+    horizon,
+):
 
-    try:
+    df = get_candles(
+        symbol,
+        provider,
+        limit=250,
+    )
 
-        df = get_klines(
-            symbol,
-            limit=250,
+    if len(df) < MIN_CANDLES:
+
+        raise ValueError(
+            f"Candle {len(df)} < {MIN_CANDLES}"
         )
 
-        if len(df) < 80:
-            raise ValueError(
-                f"Candle hanya {len(df)}"
-            )
+    params = gpr_profile()
 
-        result = gpr_project(
-            df,
-            horizon=10,
-            validation_candles=3,
-            **gpr_profile(),
-        )
+    result = gpr_project(
+        df,
+        horizon=horizon,
+        **params,
+    )
 
-        result["symbol"] = symbol
-        result["score"] = calculate_score(
-            result
-        )
+    result["symbol"] = symbol
+    result["provider"] = provider
 
-        # ----------------------------------------------------
-        # FUTURES SIGNAL
-        # ----------------------------------------------------
+    result["score"] = calculate_score(
+        result
+    )
 
-        ret = result[
-            "gpr_return_pct"
-        ]
+    result["signal"] = make_signal(
+        result
+    )
 
-        trend = result[
-            "trend"
-        ]
+    return result
 
-        momentum = result[
-            "momentum"
-        ]
 
-        hit = result[
-            "validation_hit_rate"
-        ]
+# ============================================================
+# UI
+# ============================================================
 
-        uncertainty = result[
-            "uncertainty_pct"
-        ]
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 3rem;
+        max-width: 1500px;
+    }
 
-        # LONG
-        if (
-            ret > 0
-            and trend == "BULLISH"
-            and momentum == "POSITIVE"
-            and hit >= 0.66
-        ):
-            signal = "LONG"
+    #MainMenu, footer {
+        visibility: hidden;
+    }
 
-        # SHORT
-        elif (
-            ret < 0
-            and trend == "BEARISH"
-            and momentum == "NEGATIVE"
-            and hit >= 0.66
-        ):
-            signal = "SHORT"
+    [data-testid="stMetric"] {
+        border: 1px solid #26354a;
+        padding: 12px 14px;
+        border-radius: 12px;
+    }
 
-        # WATCH
-        elif abs(ret) >= 1.0:
-            signal = "WATCH"
+    div.stButton > button {
+        border-radius: 10px;
+        min-height: 44px;
+        font-weight: 700;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-        else:
-            signal = "AVOID"
 
-        # confidence label
-        if (
-            result["score"] >= 80
-            and uncertainty < 45
-        ):
-            quality = "A"
+st.title(
+    "📈 GPR CRYPTO FUTURES SCANNER"
+)
 
-        elif (
-            result["score"] >= 70
-        ):
-            quality = "B"
+st.caption(
+    "USDT Perpetual · 1H · GPR sebagai mesin ranking utama"
+)
 
-        else:
-            quality = "C"
 
-        result["signal"] = signal
-        result["quality"] = quality
+# ============================================================
+# SIDEBAR
+# ============================================================
 
-        return result
+with st.sidebar:
 
-    except Exception as exc:
+    st.subheader(
+        "Scanner Settings"
+    )
 
-        return {
-            "symbol": symbol,
-            "error": str(exc)[:180],
-        }
+    horizon = st.selectbox(
+        "Horizon GPR",
+        [3, 5, 10, 20],
+        index=2,
+        format_func=lambda x:
+            f"{x} candle / {x} jam",
+    )
+
+    max_assets = st.selectbox(
+        "Jumlah coin",
+        [50, 100, 200, 300, 500, 1000],
+        index=1,
+    )
+
+    min_score = st.slider(
+        "Minimum score",
+        40,
+        90,
+        70,
+        5,
+    )
+
+    workers = st.slider(
+        "Parallel workers",
+        2,
+        12,
+        6,
+    )
+
+    scan_button = st.button(
+        "🚀 SCAN FUTURES 1H",
+        type="primary",
+        use_container_width=True,
+    )
+
+    clear_button = st.button(
+        "🗑️ CLEAR CACHE",
+        use_container_width=True,
+    )
+
+
+if clear_button:
+
+    st.cache_data.clear()
+
+    st.rerun()
+
+
+# ============================================================
+# UNIVERSE
+# ============================================================
+
+try:
+
+    symbols, provider = get_symbols()
+
+    st.success(
+        f"Universe siap: {len(symbols)} USDT Perpetual · "
+        f"provider utama: {provider}"
+    )
+
+except Exception as exc:
+
+    st.error(
+        f"Gagal mengambil universe futures: {exc}"
+    )
+
+    st.stop()
+
+
+symbols = symbols[:max_assets]
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "scan_results" not in st.session_state:
+
+    st.session_state.scan_results = []
+
+if "scan_errors" not in st.session_state:
+
+    st.session_state.scan_errors = []
 
 
 # ============================================================
 # SCAN
 # ============================================================
 
-def scan_symbols(
-    symbols,
-    workers=3,
-):
+if scan_button:
 
     results = []
     errors = []
 
     progress = st.progress(
         0,
-        text="Memulai scanner..."
+        text="Menyiapkan scanner..."
     )
 
     status = st.empty()
 
-    # SENGAJA workers kecil.
-    # Jangan 8-20 thread karena exchange gampang rate-limit.
+    total = len(symbols)
+
     with ThreadPoolExecutor(
         max_workers=workers
     ) as executor:
@@ -1216,166 +1652,103 @@ def scan_symbols(
             executor.submit(
                 analyze_symbol,
                 symbol,
+                provider,
+                horizon,
             ): symbol
+
             for symbol in symbols
         }
 
-        total = len(futures)
+        completed = 0
 
-        for i, future in enumerate(
-            as_completed(futures),
-            1,
+        for future in as_completed(
+            futures
         ):
 
-            result = future.result()
+            symbol = futures[
+                future
+            ]
 
-            if "error" in result:
-                errors.append(result)
+            try:
 
-            else:
-                results.append(result)
+                result = future.result()
+
+                results.append(
+                    result
+                )
+
+            except Exception as exc:
+
+                errors.append({
+
+                    "symbol":
+                        symbol,
+
+                    "error":
+                        str(exc)[:250],
+                })
+
+            completed += 1
 
             progress.progress(
-                i / total,
+                completed / total,
                 text=(
                     f"Scanning "
-                    f"{i}/{total} "
-                    f"· berhasil "
-                    f"{len(results)} "
-                    f"· gagal "
-                    f"{len(errors)}"
+                    f"{completed}/{total} · "
+                    f"{symbol}"
                 ),
             )
 
             status.info(
-                f"Last: {result['symbol']}"
+                f"Berhasil: {len(results)} · "
+                f"Gagal: {len(errors)}"
             )
 
-    progress.empty()
-    status.empty()
-
+    # Ranking
     results.sort(
         key=lambda x: (
             x["score"],
-            abs(x["gpr_return_pct"]),
+            x["gpr_return_pct"],
         ),
         reverse=True,
     )
 
-    return results, errors
-
-
-# ============================================================
-# UI
-# ============================================================
-
-st.title(
-    "📈 GPR CRYPTO FUTURES SCANNER"
-)
-
-st.caption(
-    "USDT Perpetual · 1H · "
-    "GPR sebagai mesin ranking utama"
-)
-
-st.info(
-    "Provider: Bybit Indonesia public market data. "
-    "Scanner tidak membutuhkan API key."
-)
-
-# ------------------------------------------------------------
-# SIDEBAR
-# ------------------------------------------------------------
-
-with st.sidebar:
-
-    st.header(
-        "⚙️ Scanner"
+    st.session_state.scan_results = (
+        results
     )
 
-    scan_size = st.selectbox(
-        "Jumlah coin",
-        [20, 40, 60, 80, 100],
-        index=1,
+    st.session_state.scan_errors = (
+        errors
     )
 
-    workers = st.slider(
-        "Concurrent request",
-        1,
-        5,
-        3,
-        help=(
-            "Jangan terlalu besar agar tidak "
-            "terkena rate limit."
-        ),
+    progress.progress(
+        1.0,
+        text="SCAN SELESAI"
     )
 
-    min_score = st.slider(
-        "Minimum score",
-        50,
-        95,
-        70,
-        5,
+    st.success(
+        f"Scan selesai: "
+        f"{len(results)} berhasil · "
+        f"{len(errors)} gagal"
     )
-
-    run_scan = st.button(
-        "🚀 SCAN FUTURES 1H",
-        type="primary",
-        use_container_width=True,
-    )
-
-    clear_cache = st.button(
-        "🗑️ Clear cache",
-        use_container_width=True,
-    )
-
-if clear_cache:
-
-    st.cache_data.clear()
-
-    st.rerun()
-
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if "results" not in st.session_state:
-    st.session_state.results = []
-
-if "errors" not in st.session_state:
-    st.session_state.errors = []
-
-
-# ============================================================
-# RUN
-# ============================================================
-
-if run_scan:
-
-    selected_symbols = SYMBOLS[
-        :scan_size
-    ]
-
-    results, errors = scan_symbols(
-        selected_symbols,
-        workers=workers,
-    )
-
-    st.session_state.results = results
-    st.session_state.errors = errors
 
 
 # ============================================================
 # RESULTS
 # ============================================================
 
-results = st.session_state.results
-errors = st.session_state.errors
+results = (
+    st.session_state.scan_results
+)
+
+errors = (
+    st.session_state.scan_errors
+)
+
 
 if not results:
 
-    st.warning(
+    st.info(
         "Belum ada hasil. "
         "Tekan SCAN FUTURES 1H."
     )
@@ -1383,60 +1756,102 @@ if not results:
     st.stop()
 
 
-# ------------------------------------------------------------
-# FILTER
-# ------------------------------------------------------------
-
 qualified = [
     x
     for x in results
     if x["score"] >= min_score
 ]
 
+
 longs = [
     x
     for x in qualified
-    if x["signal"] == "LONG"
+    if x["signal"]
+    == "LONG CANDIDATE"
 ]
+
 
 shorts = [
     x
     for x in qualified
-    if x["signal"] == "SHORT"
+    if x["signal"]
+    == "SHORT CANDIDATE"
 ]
 
-watch = [
-    x
-    for x in qualified
-    if x["signal"] == "WATCH"
-]
+
+best_long = (
+    max(
+        longs,
+        key=lambda x:
+        x["score"],
+    )
+    if longs
+    else None
+)
+
+
+best_short = (
+    max(
+        shorts,
+        key=lambda x:
+        x["score"],
+    )
+    if shorts
+    else None
+)
 
 
 # ============================================================
 # METRICS
 # ============================================================
 
-a, b, c, d = st.columns(4)
+c1, c2, c3, c4 = st.columns(4)
 
-a.metric(
-    "Scanned",
+c1.metric(
+    "Analyzed",
     len(results),
 )
 
-b.metric(
-    "LONG",
+c2.metric(
+    "Qualified",
+    len(qualified),
+)
+
+c3.metric(
+    "LONG Candidates",
     len(longs),
 )
 
-c.metric(
-    "SHORT",
+c4.metric(
+    "SHORT Candidates",
     len(shorts),
 )
 
-d.metric(
-    "WATCH",
-    len(watch),
-)
+
+# ============================================================
+# TOP SIGNAL
+# ============================================================
+
+if best_long:
+
+    st.success(
+        f"🟢 TOP LONG: "
+        f"{best_long['symbol']} · "
+        f"Score {best_long['score']:.1f} · "
+        f"GPR {best_long['gpr_return_pct']:+.2f}% · "
+        f"Hit {best_long['validation_hit_rate']*100:.0f}%"
+    )
+
+
+if best_short:
+
+    st.error(
+        f"🔴 TOP SHORT: "
+        f"{best_short['symbol']} · "
+        f"Score {best_short['score']:.1f} · "
+        f"GPR {best_short['gpr_return_pct']:+.2f}% · "
+        f"Hit {best_short['validation_hit_rate']*100:.0f}%"
+    )
 
 
 # ============================================================
@@ -1444,44 +1859,61 @@ d.metric(
 # ============================================================
 
 st.subheader(
-    "🏆 GPR Futures Ranking"
+    "🏆 GPR Ranking"
 )
+
 
 table = []
 
-for rank, x in enumerate(
+for rank, item in enumerate(
     qualified,
     1,
 ):
 
-    table.append(
-        {
-            "Rank": rank,
-            "Symbol": x["symbol"],
-            "Score": x["score"],
-            "Signal": x["signal"],
-            "Quality": x["quality"],
-            "GPR Return %": round(
-                x["gpr_return_pct"],
-                2,
-            ),
-            "T-3 Hit Rate": f"{x['validation_hit_rate'] * 100:.0f}%",
-            "MAPE": f"{x['validation_mape'] * 100:.2f}%",
-            "Trend": x["trend"],
-            "Momentum": x["momentum"],
-            "Rel Volume": round(
-                x["relative_volume"],
-                2,
-            ),
-            "Uncertainty": f"{x['uncertainty_pct']:.1f}%",
-            "Price": x["price"],
-            "GPR Target": x["projected_price"],
-        }
-    )
+    table.append({
+
+        "Rank":
+            rank,
+
+        "Symbol":
+            item["symbol"],
+
+        "Score":
+            item["score"],
+
+        "Signal":
+            item["signal"],
+
+        "GPR Return":
+            f"{item['gpr_return_pct']:+.2f}%",
+
+        "T-3 Hit":
+            f"{item['validation_hit_rate']*100:.0f}%",
+
+        "MAPE":
+            f"{item['validation_mape']*100:.2f}%",
+
+        "Trend":
+            item["trend"],
+
+        "Momentum":
+            item["momentum"],
+
+        "Rel Volume":
+            f"{item['relative_volume']:.2f}x",
+
+        "Uncertainty":
+            f"{item['uncertainty_pct']:.1f}%",
+
+        "Price":
+            item["price"],
+    })
+
 
 table_df = pd.DataFrame(
     table
 )
+
 
 st.dataframe(
     table_df,
@@ -1491,85 +1923,19 @@ st.dataframe(
 
 
 # ============================================================
-# LONG
+# CSV
 # ============================================================
 
-st.subheader(
-    "🟢 LONG Candidates"
+st.download_button(
+    "⬇️ Download GPR Ranking CSV",
+    table_df.to_csv(
+        index=False
+    ).encode("utf-8"),
+    file_name=(
+        "gpr_crypto_futures_1h.csv"
+    ),
+    mime="text/csv",
 )
-
-if longs:
-
-    long_df = pd.DataFrame(
-        [
-            {
-                "Symbol": x["symbol"],
-                "Score": x["score"],
-                "GPR Return %": round(
-                    x["gpr_return_pct"],
-                    2,
-                ),
-                "Hit Rate": f"{x['validation_hit_rate'] * 100:.0f}%",
-                "Uncertainty": f"{x['uncertainty_pct']:.1f}%",
-                "Price": x["price"],
-                "GPR Target": x["projected_price"],
-            }
-            for x in longs
-        ]
-    )
-
-    st.dataframe(
-        long_df,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-else:
-
-    st.info(
-        "Belum ada LONG yang memenuhi filter."
-    )
-
-
-# ============================================================
-# SHORT
-# ============================================================
-
-st.subheader(
-    "🔴 SHORT Candidates"
-)
-
-if shorts:
-
-    short_df = pd.DataFrame(
-        [
-            {
-                "Symbol": x["symbol"],
-                "Score": x["score"],
-                "GPR Return %": round(
-                    x["gpr_return_pct"],
-                    2,
-                ),
-                "Hit Rate": f"{x['validation_hit_rate'] * 100:.0f}%",
-                "Uncertainty": f"{x['uncertainty_pct']:.1f}%",
-                "Price": x["price"],
-                "GPR Target": x["projected_price"],
-            }
-            for x in shorts
-        ]
-    )
-
-    st.dataframe(
-        short_df,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-else:
-
-    st.info(
-        "Belum ada SHORT yang memenuhi filter."
-    )
 
 
 # ============================================================
@@ -1577,38 +1943,49 @@ else:
 # ============================================================
 
 st.subheader(
-    "🔎 Detail GPR"
+    "📊 Detail GPR"
 )
 
 selected = st.selectbox(
     "Pilih coin",
-    [x["symbol"] for x in results],
+    [
+        x["symbol"]
+        for x in qualified
+    ]
+    if qualified
+    else [
+        x["symbol"]
+        for x in results
+    ],
 )
+
 
 item = next(
     x
     for x in results
-    if x["symbol"] == selected
+    if x["symbol"]
+    == selected
 )
 
-m1, m2, m3, m4 = st.columns(4)
 
-m1.metric(
-    "Price",
-    f"{item['price']:,.6f}",
+d1, d2, d3, d4 = st.columns(4)
+
+d1.metric(
+    "Harga",
+    f"{item['price']:,.6g}",
 )
 
-m2.metric(
+d2.metric(
     "GPR Return",
     f"{item['gpr_return_pct']:+.2f}%",
 )
 
-m3.metric(
+d3.metric(
     "Score",
-    item["score"],
+    f"{item['score']:.1f}",
 )
 
-m4.metric(
+d4.metric(
     "Uncertainty",
     f"{item['uncertainty_pct']:.1f}%",
 )
@@ -1618,43 +1995,42 @@ preds = item[
     "predictions"
 ]
 
+
 chart = []
 
 for p in preds:
 
-    if p["is_future"]:
-
-        label = (
-            f"Future +{p['step']}"
-        )
-
-        actual = np.nan
-
-    else:
-
-        label = (
-            f"Validation +{p['step']}"
-        )
-
-        actual = p[
-            "actual_price"
-        ]
-
-    chart.append(
-        {
-            "Candle": label,
-            "GPR": p["price"],
-            "Actual": actual,
-            "Upper": p["upper"],
-            "Lower": p["lower"],
-        }
+    label = (
+        f"+{p['step'] - 3}H"
+        if p["is_future"]
+        else f"T-{3 - p['step']}"
     )
+
+    chart.append({
+
+        "Candle":
+            label,
+
+        "GPR":
+            p["price"],
+
+        "Actual":
+            p["actual_price"],
+
+        "Upper":
+            p["upper"],
+
+        "Lower":
+            p["lower"],
+    })
+
 
 chart_df = pd.DataFrame(
     chart
 ).set_index(
     "Candle"
 )
+
 
 st.line_chart(
     chart_df
@@ -1666,7 +2042,7 @@ st.line_chart(
 # ============================================================
 
 with st.expander(
-    f"⚠️ Error ({len(errors)})"
+    f"🧾 Error ({len(errors)})"
 ):
 
     if errors:
@@ -1689,11 +2065,10 @@ with st.expander(
 
 
 # ============================================================
-# DISCLAIMER
+# FOOTER
 # ============================================================
 
 st.caption(
-    "GPR adalah model eksperimental. "
-    "Score bukan probabilitas profit. "
-    "Hasil bukan saran investasi."
+    "GPR experimental scanner — bukan saran investasi. "
+    "Data futures berasal dari public market data tanpa API trading."
 )
